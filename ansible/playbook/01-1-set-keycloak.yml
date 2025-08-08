@@ -1,11 +1,14 @@
 ---
+# Configure Keycloak Integration with WildFly for DurvalCRM
+# Note: keycloak_base_url is now defined as a host variable in inventory/hosts.ini
+# - vm-dev: http://127.0.0.1:8090 (HTTP for development)
+# - vm-staging/production: https://IP:9443 (HTTPS for production)
 - name: Configure Keycloak Integration with WildFly for DurvalCRM
   hosts: vm-dev
   become: yes
   vars:
     keycloak_admin_user: "admin"
     keycloak_admin_password: "admin"
-    keycloak_base_url: "https://20.127.155.169:9443"
     keycloak_realm: "durval-crm"
     wildfly_home: "/opt/wildfly"
     realm_file: "realm-durvalcrm.json"
@@ -15,12 +18,29 @@
     test_password: "cairbar@2025"
 
   tasks:
+    - name: Set Keycloak port based on environment
+      set_fact:
+        keycloak_port: "{{ 8090 if 'vm-dev' in group_names else 9443 }}"
+        keycloak_protocol: "{{ 'http' if 'vm-dev' in group_names else 'https' }}"
+
     - name: Wait for Keycloak to be fully ready
       wait_for:
-        port: 9443
+        port: "{{ keycloak_port }}"
         host: "127.0.0.1"
         timeout: 120
         delay: 10
+
+    - name: Verify Keycloak is responding on the correct endpoint
+      uri:
+        url: "{{ keycloak_base_url }}/realms/master"
+        method: GET
+        validate_certs: false
+        status_code: 200
+        timeout: 30
+      register: keycloak_health_check
+      retries: 5
+      delay: 10
+      until: keycloak_health_check is succeeded
 
     - name: Wait for WildFly to be fully ready
       wait_for:
@@ -300,7 +320,7 @@
           Access URLs:
           - Keycloak Admin: {{ keycloak_base_url }}/admin/
           - Keycloak Realm: {{ keycloak_base_url }}/realms/{{ keycloak_realm }}
-          - WildFly Admin: https://20.127.155.169:9990
+          - WildFly Admin: {{ 'http://127.0.0.1:9990' if 'vm-dev' in group_names else 'https://' + ansible_host + ':9990' }}
           
           Test Credentials:
           - Username: {{ test_user }}
@@ -338,7 +358,7 @@
              - Password: {{ test_password }}
           
           5. Integration Test:
-             - Access protected endpoints: https://20.127.155.169:8443/{{ application_name }}/api/
+             - Access protected endpoints: {{ 'http://127.0.0.1:8080' if 'vm-dev' in group_names else 'https://' + ansible_host + ':8443' }}/{{ application_name }}/api/
              - Should redirect to Keycloak login
              - Login with test credentials
              - Access should be granted

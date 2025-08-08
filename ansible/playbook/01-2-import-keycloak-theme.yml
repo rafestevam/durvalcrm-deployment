@@ -1,11 +1,18 @@
 ---
+# Import DurvalCRM Custom Theme to Keycloak
+# Note: keycloak_http_port and keycloak_https_port are now defined as host variables in inventory/hosts.ini
+# - vm-dev: keycloak_http_port=8090, keycloak_https_port=9443
+# - vm-staging/production: keycloak_http_port=8090, keycloak_https_port=9443
 - name: Import DurvalCRM Custom Theme to Keycloak
   hosts: vm-dev
   become: yes
-  vars:
-    keycloak_https_port: "9443"
 
   tasks:
+    - name: Set Keycloak port based on environment
+      set_fact:
+        keycloak_active_port: "{{ keycloak_http_port if 'vm-dev' in group_names else keycloak_https_port }}"
+        keycloak_protocol: "{{ 'http' if 'vm-dev' in group_names else 'https' }}"
+
     # Deploy Custom Keycloak Theme
     - name: Create Keycloak themes directory
       file:
@@ -38,13 +45,26 @@
         name: keycloak
         state: restarted
 
-    - name: Wait for Keycloak to restart (non-blocking)
-      shell: |
-        # Use timeout command to prevent hanging
-        timeout 30 bash -c "echo > /dev/tcp/127.0.0.1/{{ keycloak_https_port }}" 2>/dev/null && echo "Keycloak port {{ keycloak_https_port }} is ready" || echo "Keycloak port {{ keycloak_https_port }} not ready or timeout"
+    - name: Wait for Keycloak to restart and be available
+      wait_for:
+        port: "{{ keycloak_active_port }}"
+        host: "127.0.0.1"
+        timeout: 120
+        delay: 10
       register: keycloak_restart_check
-      changed_when: false
-      failed_when: false
+
+    - name: Verify Keycloak is responding after theme deployment
+      uri:
+        url: "{{ keycloak_base_url }}/realms/master"
+        method: GET
+        validate_certs: false
+        status_code: 200
+        timeout: 30
+      register: keycloak_theme_health_check
+      retries: 3
+      delay: 10
+      until: keycloak_theme_health_check is succeeded
+      ignore_errors: true
 
     - name: Display theme deployment status
       debug:
@@ -54,9 +74,12 @@
           ----------------------------------------
           ✓ Theme deployed to: /opt/keycloak/themes/durvalcrm/
           ✓ Keycloak service restarted successfully
+          ✓ Environment: {{ 'Development (HTTP)' if 'vm-dev' in group_names else 'Production (HTTPS)' }}
+          ✓ Active Port: {{ keycloak_active_port }}
+          ✓ Health Check: {{ 'Success' if keycloak_theme_health_check is succeeded else 'Failed - manual verification needed' }}
           
           To activate the theme:
-          1. Access Keycloak Admin Console
+          1. Access Keycloak Admin Console: {{ keycloak_base_url }}/admin/
           2. Navigate to: Realm Settings → Themes
           3. Set Login Theme: "durvalcrm"
           4. Save configuration
