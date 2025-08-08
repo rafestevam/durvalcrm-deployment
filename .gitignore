@@ -1,4 +1,5 @@
 **/inventory/*
 **/playbook-artifacts/*
+**/.vagrant/*
 
 *.log

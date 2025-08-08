@@ -1,0 +1,63 @@
+---
+- name: Import DurvalCRM Custom Theme to Keycloak
+  hosts: vm-dev
+  become: yes
+  vars:
+    keycloak_https_port: "9443"
+
+  tasks:
+    # Deploy Custom Keycloak Theme
+    - name: Create Keycloak themes directory
+      file:
+        path: /opt/keycloak/themes
+        state: directory
+        owner: keycloak
+        group: keycloak
+        mode: '0755'
+
+    - name: Copy DurvalCRM custom theme to Keycloak
+      copy:
+        src: ../../../durvalcrm-keycloak-theme/durvalcrm/
+        dest: /opt/keycloak/themes/durvalcrm/
+        owner: keycloak
+        group: keycloak
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Set proper permissions for theme resources
+      file:
+        path: /opt/keycloak/themes/durvalcrm
+        state: directory
+        owner: keycloak
+        group: keycloak
+        mode: '0755'
+        recurse: yes
+
+    - name: Restart Keycloak to load custom theme
+      systemd:
+        name: keycloak
+        state: restarted
+
+    - name: Wait for Keycloak to restart (non-blocking)
+      shell: |
+        # Use timeout command to prevent hanging
+        timeout 30 bash -c "echo > /dev/tcp/127.0.0.1/{{ keycloak_https_port }}" 2>/dev/null && echo "Keycloak port {{ keycloak_https_port }} is ready" || echo "Keycloak port {{ keycloak_https_port }} not ready or timeout"
+      register: keycloak_restart_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display theme deployment status
+      debug:
+        msg: |
+          ========================================
+          DurvalCRM Custom Theme Deployment:
+          ----------------------------------------
+          ✓ Theme deployed to: /opt/keycloak/themes/durvalcrm/
+          ✓ Keycloak service restarted successfully
+          
+          To activate the theme:
+          1. Access Keycloak Admin Console
+          2. Navigate to: Realm Settings → Themes
+          3. Set Login Theme: "durvalcrm"
+          4. Save configuration
+          ========================================

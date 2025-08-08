@@ -1,0 +1,116 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# All Vagrant configuration is done below. The "2" in Vagrant.configure
+# configures the configuration version (we support older styles for
+# backwards compatibility). Please don't change it unless you know what
+# you're doing.
+Vagrant.configure("2") do |config|
+  # The most common configuration options are documented and commented below.
+  # For a complete reference, please see the online documentation at
+  # https://docs.vagrantup.com.
+
+  # Set default provider to VMware Fusion
+  ENV['VAGRANT_DEFAULT_PROVIDER'] = 'vmware_desktop'
+  
+  # Every Vagrant development environment requires a box. You can search for
+  # boxes at https://vagrantcloud.com/search.
+  # Using generic AlmaLinux 9 box (supports multiple architectures)
+  config.vm.box = "gyptazy/rocky9.3-arm64"
+
+  # Disable automatic box update checking. If you disable this, then
+  # boxes will only be checked for updates when the user runs
+  # `vagrant box outdated`. This is not recommended.
+  # config.vm.box_check_update = false
+
+  # Port forwarding for DurvalCRM development environment
+  # Main application access via Nginx proxy
+  config.vm.network "forwarded_port", guest: 9080, host: 9080, host_ip: "127.0.0.1"
+  
+  # WildFly ports for direct access and debugging
+  config.vm.network "forwarded_port", guest: 8080, host: 8080, host_ip: "127.0.0.1"  # WildFly HTTP
+  config.vm.network "forwarded_port", guest: 9990, host: 9990, host_ip: "127.0.0.1"  # WildFly Admin
+  
+  # Keycloak ports for direct access
+  config.vm.network "forwarded_port", guest: 8090, host: 8090, host_ip: "127.0.0.1"  # Keycloak HTTP
+  
+  # PostgreSQL for database management tools
+  config.vm.network "forwarded_port", guest: 5432, host: 5432, host_ip: "127.0.0.1"  # PostgreSQL
+  
+  # Vite dev server (if running on VM)
+  config.vm.network "forwarded_port", guest: 5173, host: 5173, host_ip: "127.0.0.1"  # Vite dev server
+
+  # Create a private network, which allows host-only access to the machine
+  # using a specific IP.
+  # config.vm.network "private_network", ip: "192.168.33.10"
+
+  # Create a public network, which generally matched to bridged network.
+  # Bridged networks make the machine appear as another physical device on
+  # your network.
+  # config.vm.network "public_network"
+
+  # Share an additional folder to the guest VM. The first argument is
+  # the path on the host to the actual folder. The second argument is
+  # the path on the guest to mount the folder. And the optional third
+  # argument is a set of non-required options.
+  # config.vm.synced_folder "../data", "/vagrant_data"
+
+  # Disable the default share of the current code directory. Doing this
+  # provides improved isolation between the vagrant box and your host
+  # by making sure your Vagrantfile isn't accessible to the vagrant box.
+  # If you use this you may want to enable additional shared subfolders as
+  # shown above.
+  # config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # Provider-specific configuration so you can fine-tune various
+  # backing providers for Vagrant. These expose provider-specific options.
+  # Example for VirtualBox:
+  #
+  config.vm.provider "vmware_desktop" do |vm|
+    # Disable GUI - runs headless
+    vm.gui = false
+    
+    # Memory and CPU configuration
+    vm.memory = 4096
+    vm.cpus = 2
+    
+    # Required for ARM64 on VMware Fusion
+    vm.vmx["ethernet0.virtualdev"] = "vmxnet3"
+    
+    # Additional optimizations for Mac M1
+    vm.vmx["virtualHW.version"] = "20"
+    vm.vmx["guestOS"] = "arm-rhel9-64"
+  end
+  #
+  # View the documentation for the provider you are using for more
+  # information on available options.
+
+  # Enable provisioning with a shell script to set root password
+  config.vm.provision "shell", inline: <<-SHELL
+    # Set root password to 'admin'
+    echo 'root:admin' | chpasswd
+    
+    # Enable root login via SSH (optional)
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+    systemctl restart sshd
+    
+    # Display access information
+    echo ""
+    echo "=========================================="
+    echo "DurvalCRM Development Environment Ready"
+    echo "=========================================="
+    echo "Access URLs (from host machine):"
+    echo "  Main Application: http://localhost:9080/crm"
+    echo "  Admin Console:    http://localhost:9080/admin"
+    echo "  Health Check:     http://localhost:9080/health"
+    echo ""
+    echo "Direct Service Access:"
+    echo "  WildFly HTTP:     http://localhost:8080"
+    echo "  WildFly Admin:    http://localhost:9990"
+    echo "  Keycloak HTTP:    http://localhost:8090"
+    echo "  PostgreSQL:       localhost:5432"
+    echo "  Vite Dev Server:  http://localhost:5173"
+    echo "=========================================="
+    echo ""
+  SHELL
+end
