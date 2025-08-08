@@ -1,0 +1,111 @@
+---
+- name: Verify DurvalCRM J2EE Application Deployment
+  hosts: vm-dev
+  become: yes
+  vars:
+    app_name: "durvalcrm"
+    wildfly_host: "localhost"
+    wildfly_mgmt_port: "9990"
+    wildfly_user: "admin"
+    wildfly_password: "wildfly@2025"
+    app_base_url: "https://20.127.155.169:8443/durvalcrm"
+
+  tasks:
+    - name: Check WildFly service status
+      systemd:
+        name: wildfly
+      register: wildfly_status
+
+    - name: Check if application is deployed in WildFly
+      shell: |
+        cd /opt/wildfly
+        ./bin/jboss-cli.sh --connect --controller=127.0.0.1:9990 \
+          --command="deployment-info --name={{ app_name }}.war"
+      become_user: wildfly
+      register: deployment_check
+      ignore_errors: yes
+
+    - name: List all deployments
+      shell: |
+        cd /opt/wildfly
+        ./bin/jboss-cli.sh --connect --controller=127.0.0.1:9990 \
+          --command="deployment-info"
+      become_user: wildfly
+      register: all_deployments
+      ignore_errors: yes
+
+    - name: Check WildFly logs for any errors
+      shell: |
+        tail -50 /opt/wildfly/standalone/log/server.log | grep -i -E "(error|exception|fail)" || echo "No errors found in recent logs"
+      register: wildfly_logs
+      ignore_errors: yes
+
+    - name: Test HTTP connectivity to application
+      uri:
+        url: "{{ app_base_url }}/"
+        method: GET
+        validate_certs: false
+        status_code: [200, 404, 403]
+      register: http_test
+      ignore_errors: yes
+
+    - name: Test API health endpoint
+      uri:
+        url: "{{ app_base_url }}/api/health"
+        method: GET
+        validate_certs: false
+        status_code: [200, 404, 403, 500]
+      register: health_test
+      ignore_errors: yes
+
+    - name: Test API associados endpoint
+      uri:
+        url: "{{ app_base_url }}/api/associados"
+        method: GET
+        validate_certs: false
+        status_code: [200, 404, 403, 500]
+      register: associados_test
+      ignore_errors: yes
+
+    - name: Display deployment verification results
+      debug:
+        msg: |
+          =================================
+          DurvalCRM Deployment Verification Results:
+          =================================
+          
+          WildFly Service Status: {{ wildfly_status.status.ActiveState }}
+          
+          Application Deployment:
+          {{ deployment_check.stdout if deployment_check.rc == 0 else 'Application not found or error: ' + deployment_check.stderr }}
+          
+          All Deployments:
+          {{ all_deployments.stdout if all_deployments.rc == 0 else 'Error listing deployments: ' + all_deployments.stderr }}
+          
+          Recent Logs (Errors):
+          {{ wildfly_logs.stdout }}
+          
+          HTTP Tests:
+          - Root URL ({{ app_base_url }}/): {{ http_test.status }} {{ http_test.msg if http_test.msg is defined else '' }}
+          - Health API ({{ app_base_url }}/api/health): {{ health_test.status if health_test.status is defined else 'Failed' }} {{ health_test.msg if health_test.msg is defined else '' }}
+          - Associados API ({{ app_base_url }}/api/associados): {{ associados_test.status if associados_test.status is defined else 'Failed' }} {{ associados_test.msg if associados_test.msg is defined else '' }}
+          
+          Next Steps:
+          {% if deployment_check.rc == 0 %}
+          - ✅ Application is deployed successfully
+          - Test individual API endpoints
+          - Check database connectivity
+          {% else %}
+          - ❌ Application deployment issue detected
+          - Check WildFly logs for details
+          - Verify deployment was successful
+          {% endif %}
+          
+          Application URLs:
+          - Base: {{ app_base_url }}/
+          - Health: {{ app_base_url }}/api/health
+          - Members API: {{ app_base_url }}/api/associados
+          - Payments API: {{ app_base_url }}/api/mensalidades
+          - Donations API: {{ app_base_url }}/api/doacoes
+          - Sales API: {{ app_base_url }}/api/vendas
+          - Dashboard API: {{ app_base_url }}/api/dashboard

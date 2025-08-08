@@ -1,0 +1,787 @@
+---
+- name: Setup Development Environment for DurvalCRM
+  hosts: vm-dev
+  become: yes
+  vars:
+    postgresql_version: "15"
+    postgresql_user: "durvalcrm_dev"
+    postgresql_password: "durvalcrm@123"
+    postgresql_db: "durvalcrm_db"
+    keycloak_version: "26.0.7"
+    keycloak_admin_user: "admin"
+    keycloak_admin_password: "admin"
+    keycloak_https_port: "9443"
+    wildfly_version: "37.0.0.Final"
+    wildfly_https_port: "8443"
+    java_version: "17"
+
+  tasks:
+    # Java Installation (required for Keycloak and WildFly)
+    - name: Install Java {{ java_version }}
+      package:
+        name: 
+          - "java-{{ java_version }}-openjdk"
+          - "java-{{ java_version }}-openjdk-devel"
+        state: present
+
+    # PostgreSQL 15 Installation and Configuration
+    - name: Install EPEL repository (required for some dependencies)
+      package:
+        name: epel-release
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install PostgreSQL GPG key
+      rpm_key:
+        key: https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install PostgreSQL {{ postgresql_version }} repository
+      package:
+        name: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-{{ ansible_distribution_major_version }}-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install PostgreSQL {{ postgresql_version }} packages
+      package:
+        name:
+          - "postgresql{{ postgresql_version }}"
+          - "postgresql{{ postgresql_version }}-server"
+          - "postgresql{{ postgresql_version }}-contrib"
+          - "python3-psycopg2"
+        state: present
+
+    - name: Check if PostgreSQL is initialized
+      stat:
+        path: "/var/lib/pgsql/{{ postgresql_version }}/data/PG_VERSION"
+      register: pgdata_dir_version
+
+    - name: Initialize PostgreSQL database
+      command: "/usr/pgsql-{{ postgresql_version }}/bin/postgresql-{{ postgresql_version }}-setup initdb"
+      when: not pgdata_dir_version.stat.exists
+
+    - name: Configure PostgreSQL authentication for local connections
+      lineinfile:
+        path: "/var/lib/pgsql/{{ postgresql_version }}/data/pg_hba.conf"
+        regexp: "^local\\s+all\\s+all\\s+"
+        line: "local   all             all                                     trust"
+        backup: yes
+
+    - name: Configure PostgreSQL authentication for postgres user
+      lineinfile:
+        path: "/var/lib/pgsql/{{ postgresql_version }}/data/pg_hba.conf"
+        regexp: "^local\\s+all\\s+postgres\\s+"
+        line: "local   all             postgres                                trust"
+        insertbefore: "^local\\s+all\\s+all"
+        backup: yes
+
+    - name: Configure PostgreSQL to listen on all interfaces
+      lineinfile:
+        path: "/var/lib/pgsql/{{ postgresql_version }}/data/postgresql.conf"
+        regexp: "^#?listen_addresses"
+        line: "listen_addresses = '*'"
+        backup: yes
+
+    - name: Start and enable PostgreSQL service
+      systemd:
+        name: "postgresql-{{ postgresql_version }}"
+        state: started
+        enabled: yes
+
+    - name: Restart PostgreSQL service to apply configuration changes
+      systemd:
+        name: "postgresql-{{ postgresql_version }}"
+        state: restarted
+
+    - name: Create PostgreSQL user
+      postgresql_user:
+        name: "{{ postgresql_user }}"
+        password: "{{ postgresql_password }}"
+        state: present
+      become_user: postgres
+
+    - name: Create PostgreSQL database
+      postgresql_db:
+        name: "{{ postgresql_db }}"
+        owner: "{{ postgresql_user }}"
+        state: present
+      become_user: postgres
+
+    - name: Grant all privileges on database to user
+      postgresql_privs:
+        database: "{{ postgresql_db }}"
+        privs: ALL
+        type: database
+        role: "{{ postgresql_user }}"
+        state: present
+      become_user: postgres
+
+    - name: Secure PostgreSQL authentication after user creation
+      lineinfile:
+        path: "/var/lib/pgsql/{{ postgresql_version }}/data/pg_hba.conf"
+        regexp: "^local\\s+all\\s+all\\s+trust"
+        line: "local   all             all                                     md5"
+        backup: yes
+
+    - name: Add host authentication for durvalcrm database
+      lineinfile:
+        path: "/var/lib/pgsql/{{ postgresql_version }}/data/pg_hba.conf"
+        line: "host    {{ postgresql_db }}    {{ postgresql_user }}    0.0.0.0/0    md5"
+        insertafter: "^local\\s+all\\s+all"
+        backup: yes
+
+    - name: Restart PostgreSQL to apply security settings
+      systemd:
+        name: "postgresql-{{ postgresql_version }}"
+        state: restarted
+
+    # Keycloak 26 Standalone Installation
+    - name: Create keycloak user
+      user:
+        name: keycloak
+        home: /var/lib/keycloak
+        system: yes
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Download Keycloak {{ keycloak_version }}
+      unarchive:
+        src: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"
+        dest: /opt
+        remote_src: yes
+        owner: keycloak
+        group: keycloak
+        creates: "/opt/keycloak-{{ keycloak_version }}"
+
+    - name: Check if /opt/keycloak exists and is not a symlink
+      stat:
+        path: /opt/keycloak
+      register: keycloak_dir
+
+    - name: Remove existing keycloak directory if it exists and is not a symlink
+      file:
+        path: /opt/keycloak
+        state: absent
+      when: keycloak_dir.stat.exists and not keycloak_dir.stat.islnk
+
+    - name: Create Keycloak symlink
+      file:
+        src: "/opt/keycloak-{{ keycloak_version }}"
+        dest: /opt/keycloak
+        state: link
+        owner: keycloak
+        group: keycloak
+
+    - name: Create Keycloak data directory
+      file:
+        path: /opt/keycloak/data
+        state: directory
+        owner: keycloak
+        group: keycloak
+        mode: '0755'
+
+    - name: Ensure Keycloak conf directory exists
+      file:
+        path: /opt/keycloak/conf
+        state: directory
+        owner: keycloak
+        group: keycloak
+        mode: '0755'
+
+    - name: Create Keycloak admin user
+      command: |
+        /opt/keycloak/bin/kc.sh build
+      become_user: keycloak
+      args:
+        creates: /opt/keycloak/data/h2/keycloakdb.mv.db
+
+    - name: Create self-signed certificate for Keycloak
+      command: |
+        keytool -genkeypair -storepass password -storetype PKCS12 -keyalg RSA -keysize 2048 
+        -dname "CN=20.127.155.169" -alias server -ext "SAN:c=DNS:localhost,IP:20.127.155.169,IP:127.0.0.1" 
+        -keystore /opt/keycloak/conf/server.keystore
+      become_user: keycloak
+      args:
+        creates: /opt/keycloak/conf/server.keystore
+
+    - name: Create Keycloak systemd service
+      copy:
+        dest: /etc/systemd/system/keycloak.service
+        content: |
+          [Unit]
+          Description=Keycloak
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=keycloak
+          Group=keycloak
+          WorkingDirectory=/opt/keycloak
+          Environment="KEYCLOAK_ADMIN={{ keycloak_admin_user }}"
+          Environment="KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }}"
+          Environment="JAVA_HOME=/usr/lib/jvm/java-{{ java_version }}-openjdk"
+          ExecStart=/opt/keycloak/bin/kc.sh start-dev --https-port={{ keycloak_https_port }} --http-port=8090 --hostname-strict=false --hostname=20.127.155.169
+          TimeoutStartSec=600
+          TimeoutStopSec=600
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Start and enable Keycloak service
+      systemd:
+        name: keycloak
+        state: started
+        enabled: yes
+
+    - name: Restart Keycloak service to apply hostname configuration
+      systemd:
+        name: keycloak
+        state: restarted
+
+    - name: Wait for Keycloak HTTP port to be available (fallback check)
+      wait_for:
+        port: 8090
+        host: "127.0.0.1"
+        timeout: 60
+        delay: 10
+      ignore_errors: yes
+
+    - name: Check if Keycloak HTTPS port is listening
+      wait_for:
+        port: "{{ keycloak_https_port }}"
+        host: "127.0.0.1"
+        timeout: 30
+        delay: 5
+      ignore_errors: yes
+      register: keycloak_https_check
+
+    - name: Display Keycloak port status
+      debug:
+        msg: "Keycloak HTTPS port {{ keycloak_https_port }} status: {{ 'Available' if keycloak_https_check is succeeded else 'Not available - check Keycloak logs' }}"
+
+    # WildFly 37 Final Installation
+    - name: Create wildfly user
+      user:
+        name: wildfly
+        home: /var/lib/wildfly
+        system: yes
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Download WildFly {{ wildfly_version }}
+      unarchive:
+        src: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/wildfly-{{ wildfly_version }}.tar.gz"
+        dest: /opt
+        remote_src: yes
+        owner: wildfly
+        group: wildfly
+        creates: "/opt/wildfly-{{ wildfly_version }}"
+
+    - name: Check if /opt/wildfly exists and is not a symlink
+      stat:
+        path: /opt/wildfly
+      register: wildfly_dir
+
+    - name: Remove existing wildfly directory if it exists and is not a symlink
+      file:
+        path: /opt/wildfly
+        state: absent
+      when: wildfly_dir.stat.exists and not wildfly_dir.stat.islnk
+
+    - name: Create WildFly symlink
+      file:
+        src: "/opt/wildfly-{{ wildfly_version }}"
+        dest: /opt/wildfly
+        state: link
+        owner: wildfly
+        group: wildfly
+
+    - name: Create WildFly directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: wildfly
+        group: wildfly
+        mode: '0755'
+      loop:
+        - /var/log/wildfly
+        - /var/run/wildfly
+        - /opt/wildfly/standalone/deployments
+
+    - name: Configure WildFly for HTTPS
+      copy:
+        dest: /opt/wildfly/bin/configure-https.cli
+        owner: wildfly
+        group: wildfly
+        content: |
+          embed-server --server-config=standalone.xml
+          if (outcome != success) of /subsystem=elytron/key-store=httpsKS:read-resource
+              /subsystem=elytron/key-store=httpsKS:add(path=application.keystore,relative-to=jboss.server.config.dir,credential-reference={clear-text=password},type=PKCS12)
+              /subsystem=elytron/key-store=httpsKS:generate-key-pair(alias=server,algorithm=RSA,key-size=2048,validity=365,distinguished-name="CN=20.127.155.169",extensions=[{subject-alternative-names="IP:20.127.155.169,DNS:localhost"}])
+          end-if
+          if (outcome != success) of /subsystem=elytron/key-manager=httpsKM:read-resource
+              /subsystem=elytron/key-manager=httpsKM:add(key-store=httpsKS,credential-reference={clear-text=password})
+          end-if
+          if (outcome != success) of /subsystem=elytron/server-ssl-context=httpsSSC:read-resource
+              /subsystem=elytron/server-ssl-context=httpsSSC:add(key-manager=httpsKM,protocols=["TLSv1.2"],cipher-suite-filter="DEFAULT")
+          end-if
+          if (outcome != success) of /subsystem=undertow/server=default-server/https-listener=https:read-resource
+              /subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https,ssl-context=httpsSSC,enabled=true)
+          else
+              /subsystem=undertow/server=default-server/https-listener=https:write-attribute(name=ssl-context,value=httpsSSC)
+              /subsystem=undertow/server=default-server/https-listener=https:write-attribute(name=enabled,value=true)
+          end-if
+          /socket-binding-group=standard-sockets/socket-binding=https:write-attribute(name=port,value={{ wildfly_https_port }})
+          stop-embedded-server
+
+    - name: Check if WildFly HTTPS keystore exists
+      stat:
+        path: /opt/wildfly/standalone/configuration/application.keystore
+      register: wildfly_keystore
+
+    - name: Generate WildFly HTTPS keystore
+      shell: |
+        /opt/wildfly/bin/jboss-cli.sh --file=/opt/wildfly/bin/configure-https.cli
+      become_user: wildfly
+      when: not wildfly_keystore.stat.exists
+      ignore_errors: yes
+
+    - name: Create WildFly systemd service
+      copy:
+        dest: /etc/systemd/system/wildfly.service
+        content: |
+          [Unit]
+          Description=WildFly Application Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=wildfly
+          Group=wildfly
+          WorkingDirectory=/opt/wildfly
+          Environment="JAVA_HOME=/usr/lib/jvm/java-{{ java_version }}-openjdk"
+          ExecStart=/opt/wildfly/bin/standalone.sh -b 0.0.0.0 -bmanagement 0.0.0.0
+          TimeoutStartSec=600
+          TimeoutStopSec=600
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Start and enable WildFly service
+      systemd:
+        name: wildfly
+        state: started
+        enabled: yes
+
+    - name: Restart WildFly service to apply SSL configuration
+      systemd:
+        name: wildfly
+        state: restarted
+      when: not wildfly_keystore.stat.exists
+
+    - name: Wait for WildFly to be ready
+      wait_for:
+        port: 9990
+        host: "127.0.0.1"
+        timeout: 60
+        delay: 10
+
+    - name: Create WildFly admin user
+      command: |
+        /opt/wildfly/bin/add-user.sh -u admin -p 'wildfly@2025' -s
+      become_user: wildfly
+      become: yes
+      args:
+        creates: /opt/wildfly/standalone/configuration/mgmt-users.properties
+      register: wildfly_admin_user_created
+
+    - name: Restart WildFly after admin user creation
+      systemd:
+        name: wildfly
+        state: restarted
+      when: wildfly_admin_user_created.changed
+
+    - name: Wait for WildFly HTTP port to be available (fallback check)
+      wait_for:
+        port: 8080
+        host: "127.0.0.1"
+        timeout: 60
+        delay: 10
+      ignore_errors: yes
+
+    - name: Check if WildFly HTTPS port is listening
+      wait_for:
+        port: "{{ wildfly_https_port }}"
+        host: "127.0.0.1"
+        timeout: 30
+        delay: 5
+      ignore_errors: yes
+      register: wildfly_https_check
+
+    - name: Display WildFly port status
+      debug:
+        msg: "WildFly HTTPS port {{ wildfly_https_port }} status: {{ 'Available' if wildfly_https_check is succeeded else 'Not available - check WildFly logs' }}"
+
+    # Force SSL certificate regeneration if needed
+    - name: Remove existing Keycloak keystore to force regeneration
+      file:
+        path: /opt/keycloak/conf/server.keystore
+        state: absent
+      register: keycloak_keystore_removed
+
+    - name: Remove existing WildFly keystore to force regeneration
+      file:
+        path: /opt/wildfly/standalone/configuration/application.keystore
+        state: absent
+      register: wildfly_keystore_removed
+
+    - name: Regenerate Keycloak certificate
+      command: |
+        keytool -genkeypair -storepass password -storetype PKCS12 -keyalg RSA -keysize 2048 
+        -dname "CN=20.127.155.169" -alias server -ext "SAN:c=DNS:localhost,IP:20.127.155.169,IP:127.0.0.1" 
+        -keystore /opt/keycloak/conf/server.keystore
+      become_user: keycloak
+      when: keycloak_keystore_removed.changed
+
+    - name: Regenerate WildFly SSL configuration
+      shell: |
+        /opt/wildfly/bin/jboss-cli.sh --file=/opt/wildfly/bin/configure-https.cli
+      become_user: wildfly
+      when: wildfly_keystore_removed.changed
+      ignore_errors: yes
+
+    - name: Restart Keycloak service after certificate regeneration
+      systemd:
+        name: keycloak
+        state: restarted
+      when: keycloak_keystore_removed.changed
+
+    - name: Restart WildFly service after certificate regeneration
+      systemd:
+        name: wildfly
+        state: restarted
+      when: wildfly_keystore_removed.changed
+
+    - name: Wait for services to restart
+      pause:
+        seconds: 15
+      when: keycloak_keystore_removed.changed or wildfly_keystore_removed.changed
+
+    - name: Final check - Keycloak HTTPS port
+      wait_for:
+        port: "{{ keycloak_https_port }}"
+        host: "127.0.0.1"
+        timeout: 30
+        delay: 5
+      ignore_errors: yes
+      register: final_keycloak_check
+
+    - name: Final check - WildFly HTTPS port
+      wait_for:
+        port: "{{ wildfly_https_port }}"
+        host: "127.0.0.1"  
+        timeout: 30
+        delay: 5
+      ignore_errors: yes
+      register: final_wildfly_check
+
+    - name: Display final service status
+      debug:
+        msg: |
+          Final Status:
+          - Keycloak HTTPS ({{ keycloak_https_port }}): {{ 'Available' if final_keycloak_check is succeeded else 'Not available' }}
+          - WildFly HTTPS ({{ wildfly_https_port }}): {{ 'Available' if final_wildfly_check is succeeded else 'Not available' }}
+
+    # NGINX Installation and Configuration for Reverse Proxy
+    - name: Install NGINX
+      package:
+        name: nginx
+        state: present
+
+    - name: Install Certbot and python3-certbot-nginx
+      package:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Copy initial NGINX configuration (HTTP only for Let's Encrypt validation)
+      copy:
+        dest: /etc/nginx/conf.d/letsencrypt-temp.conf
+        content: |
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name durvalcrm.org www.durvalcrm.org;
+              
+              location /.well-known/acme-challenge/ {
+                  root /var/www/html;
+              }
+              
+              location / {
+                  return 301 https://$host$request_uri;
+              }
+          }
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create webroot directory for Let's Encrypt
+      file:
+        path: /var/www/html
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Start NGINX temporarily for Let's Encrypt validation
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Generate Let's Encrypt certificate for durvalcrm.org
+      command: |
+        certbot certonly --nginx --non-interactive --agree-tos 
+        --email admin@durvalcrm.org 
+        -d durvalcrm.org 
+        -d www.durvalcrm.org
+      args:
+        creates: /etc/letsencrypt/live/durvalcrm.org/fullchain.pem
+      register: certbot_result
+      ignore_errors: yes
+
+    - name: Check if Let's Encrypt certificate was created successfully
+      stat:
+        path: /etc/letsencrypt/live/durvalcrm.org/fullchain.pem
+      register: letsencrypt_cert
+
+    - name: Generate fallback self-signed certificate if Let's Encrypt fails
+      block:
+        - name: Create NGINX SSL directory for fallback
+          file:
+            path: /etc/nginx/ssl
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Generate fallback self-signed SSL certificate
+          command: |
+            openssl req -x509 -nodes -days 365 -newkey rsa:2048 
+            -keyout /etc/nginx/ssl/fallback.key 
+            -out /etc/nginx/ssl/fallback.crt 
+            -subj "/C=BR/ST=State/L=City/O=DurvalCRM/CN=durvalcrm.org"
+          args:
+            creates: /etc/nginx/ssl/fallback.crt
+
+        - name: Set permissions for fallback SSL certificate
+          file:
+            path: /etc/nginx/ssl/fallback.crt
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Set permissions for fallback SSL private key
+          file:
+            path: /etc/nginx/ssl/fallback.key
+            owner: root
+            group: root
+            mode: '0600'
+      when: not letsencrypt_cert.stat.exists
+
+    - name: Remove temporary NGINX configuration
+      file:
+        path: /etc/nginx/conf.d/letsencrypt-temp.conf
+        state: absent
+
+    - name: Copy NGINX configuration with Let's Encrypt certificates
+      copy:
+        src: ../files/nginx/nginx.conf
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      when: letsencrypt_cert.stat.exists
+
+    - name: Copy fallback NGINX configuration with self-signed certificates
+      copy:
+        src: ../files/nginx/nginx-simple.conf
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      when: not letsencrypt_cert.stat.exists
+
+    - name: Setup auto-renewal for Let's Encrypt certificates
+      cron:
+        name: "Let's Encrypt renewal"
+        minute: "0"
+        hour: "2"
+        job: "/usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx'"
+        state: present
+      when: letsencrypt_cert.stat.exists
+
+    - name: Display certificate status
+      debug:
+        msg: |
+          {% if letsencrypt_cert.stat.exists %}
+          ✓ Let's Encrypt certificates successfully installed for durvalcrm.org and www.durvalcrm.org
+          ✓ Auto-renewal configured via cron job
+          {% else %}
+          ⚠ Let's Encrypt certificate generation failed
+          ⚠ Using self-signed fallback certificates
+          ⚠ To retry Let's Encrypt later, ensure DNS A records for durvalcrm.org and www.durvalcrm.org point to 20.127.155.169
+          {% endif %}
+
+    - name: Test NGINX configuration
+      command: nginx -t
+      register: nginx_config_test
+      ignore_errors: yes
+
+    - name: Display NGINX configuration test result
+      debug:
+        msg: "{{ nginx_config_test.stdout_lines }}"
+      when: nginx_config_test is defined
+
+    - name: Start and enable NGINX service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+      when: nginx_config_test.rc == 0
+
+    - name: Reload NGINX to apply configuration
+      systemd:
+        name: nginx
+        state: reloaded
+      when: nginx_config_test.rc == 0
+
+    # IPTables Configuration for Direct Port Access and NGINX
+    - name: Install iptables-services
+      package:
+        name: iptables-services
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Allow HTTP port 80 through iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "80"
+        jump: ACCEPT
+        comment: "Allow HTTP access for NGINX"
+      become: yes
+
+    - name: Allow HTTPS port 443 through iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "443"
+        jump: ACCEPT
+        comment: "Allow HTTPS access for NGINX"
+      become: yes
+
+    - name: Allow WildFly HTTPS port 8443 through iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "8443"
+        jump: ACCEPT
+        comment: "Allow WildFly HTTPS access"
+      become: yes
+
+    - name: Allow Keycloak HTTPS port 9443 through iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "9443"
+        jump: ACCEPT  
+        comment: "Allow Keycloak HTTPS access"
+      become: yes
+
+    - name: Save iptables rules
+      shell: iptables-save > /etc/sysconfig/iptables
+      become: yes
+      when: ansible_os_family == "RedHat"
+
+    # Display final access information
+    # Deploy Custom Keycloak Theme
+    - name: Create Keycloak themes directory
+      file:
+        path: /opt/keycloak/themes
+        state: directory
+        owner: keycloak
+        group: keycloak
+        mode: '0755'
+
+    - name: Copy DurvalCRM custom theme to Keycloak
+      copy:
+        src: ../../../durvalcrm-keycloak-theme/durvalcrm/
+        dest: /opt/keycloak/themes/durvalcrm/
+        owner: keycloak
+        group: keycloak
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Set proper permissions for theme resources
+      file:
+        path: /opt/keycloak/themes/durvalcrm
+        state: directory
+        owner: keycloak
+        group: keycloak
+        mode: '0755'
+        recurse: yes
+
+    - name: Restart Keycloak to load custom theme
+      systemd:
+        name: keycloak
+        state: restarted
+
+    - name: Wait for Keycloak to restart
+      wait_for:
+        port: "{{ keycloak_https_port }}"
+        host: "127.0.0.1"
+        timeout: 60
+        delay: 10
+
+    - name: Display access information
+      debug:
+        msg: |
+          ========================================
+          Services are accessible at:
+          ----------------------------------------
+          Frontend Application (CRM):
+          - URL: https://durvalcrm.org/crm
+          - Direct: https://20.127.155.169:8443/durvalcrm-frontend
+          
+          Keycloak Admin Console:
+          - URL: https://durvalcrm.org/admin
+          - Direct: https://20.127.155.169:9443
+          
+          DurvalCRM Custom Theme:
+          - Theme deployed to: /opt/keycloak/themes/durvalcrm/
+          - To activate: Admin Console → Realm Settings → Themes → Login Theme: "durvalcrm"
+          
+          Note: Ensure DNS A records point to 20.127.155.169:
+          - durvalcrm.org → 20.127.155.169
+          - www.durvalcrm.org → 20.127.155.169
+          
+          For local testing, add to /etc/hosts:
+          20.127.155.169 durvalcrm.org www.durvalcrm.org
+          ========================================

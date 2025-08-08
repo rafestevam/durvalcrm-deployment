@@ -1,0 +1,4 @@
+**/inventory/*
+**/playbook-artifacts/*
+
+*.log

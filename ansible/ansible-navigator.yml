@@ -1,0 +1,22 @@
+---
+ansible-navigator:
+  ansible:
+    inventory:
+      entries:
+        - ./inventory/hosts.ini
+    config:
+      help: False
+      path: ./ansible.cfg
+  ansible-runner:
+    job-events: True
+    rotate-artifacts-count: 10
+    timeout: 300
+  execution-environment:
+    enabled: False
+  playbook-artifact:
+    enable: True
+    save-as: ./playbook-artifacts/{playbook_name}-artifact.json
+  logging:
+    level: debug
+    append: True
+    file: /Users/rafaeldeoliveira/projects/DurvalCRM/durvalcrm-deployment/ansible/ansible-navigator.log

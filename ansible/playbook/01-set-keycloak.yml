@@ -1,0 +1,369 @@
+---
+- name: Configure Keycloak Integration with WildFly for DurvalCRM
+  hosts: vm-dev
+  become: yes
+  vars:
+    keycloak_admin_user: "admin"
+    keycloak_admin_password: "admin"
+    keycloak_base_url: "https://20.127.155.169:9443"
+    keycloak_realm: "durval-crm"
+    wildfly_home: "/opt/wildfly"
+    realm_file: "realm-durvalcrm.json"
+    application_name: "durvalcrm-j2ee"
+    keycloak_client_id: "durvalcrm-app"
+    test_user: "tesouraria"
+    test_password: "cairbar@2025"
+
+  tasks:
+    - name: Wait for Keycloak to be fully ready
+      wait_for:
+        port: 9443
+        host: "127.0.0.1"
+        timeout: 120
+        delay: 10
+
+    - name: Wait for WildFly to be fully ready
+      wait_for:
+        port: 9990
+        host: "127.0.0.1"
+        timeout: 120
+        delay: 10
+
+    # Task 1: Import Keycloak Realm
+    - name: Copy realm file to server
+      copy:
+        src: "../files/keycloak/{{ realm_file }}"
+        dest: "/tmp/{{ realm_file }}"
+        owner: keycloak
+        group: keycloak
+        mode: '0644'
+
+    - name: Get Keycloak admin access token
+      uri:
+        url: "{{ keycloak_base_url }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: admin-cli
+          username: "{{ keycloak_admin_user }}"
+          password: "{{ keycloak_admin_password }}"
+        validate_certs: false
+        status_code: 200
+      register: keycloak_auth_result
+      retries: 5
+      delay: 10
+
+    - name: Check if realm already exists
+      uri:
+        url: "{{ keycloak_base_url }}/admin/realms/{{ keycloak_realm }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_auth_result.json.access_token }}"
+        validate_certs: false
+        status_code: [200, 404]
+      register: realm_check
+      ignore_errors: yes
+
+    - name: Copy Python import script to server
+      copy:
+        src: "../files/scripts/import-realm-via-api.py"
+        dest: "/tmp/import-realm-via-api.py"
+        mode: '0755'
+      when: realm_check.status == 404 or realm_check is failed
+
+    - name: Verify Python3 is available
+      command: python3 --version
+      register: python_check
+      when: realm_check.status == 404 or realm_check is failed
+
+    - name: Copy curl-based import script as fallback
+      copy:
+        src: "../files/scripts/import-realm-via-curl.sh"
+        dest: "/tmp/import-realm-via-curl.sh"
+        mode: '0755'
+      when: realm_check.status == 404 or realm_check is failed
+
+    - name: Copy minimal realm creation script as final fallback
+      copy:
+        src: "../files/scripts/create-realm-minimal.py"
+        dest: "/tmp/create-realm-minimal.py"
+        mode: '0755'
+      when: realm_check.status == 404 or realm_check is failed
+
+    - name: Import realm and create user using Python script
+      shell: |
+        python3 /tmp/import-realm-via-api.py \
+          "{{ keycloak_base_url }}" \
+          "{{ keycloak_admin_user }}" \
+          "{{ keycloak_admin_password }}" \
+          "/tmp/{{ realm_file }}" \
+          "{{ test_user }}" \
+          "{{ test_password }}"
+      register: realm_import_result
+      when: realm_check.status == 404 or realm_check is failed
+      ignore_errors: yes
+
+    - name: Import realm and create user using curl script as fallback
+      shell: |
+        /tmp/import-realm-via-curl.sh \
+          "{{ keycloak_base_url }}" \
+          "{{ keycloak_admin_user }}" \
+          "{{ keycloak_admin_password }}" \
+          "/tmp/{{ realm_file }}" \
+          "{{ test_user }}" \
+          "{{ test_password }}"
+      register: realm_import_fallback
+      when: (realm_check.status == 404 or realm_check is failed) and (realm_import_result is failed or realm_import_result.rc != 0)
+      ignore_errors: yes
+
+    - name: Create minimal realm as final fallback when large JSON import fails
+      shell: |
+        python3 /tmp/create-realm-minimal.py \
+          "{{ keycloak_base_url }}" \
+          "{{ keycloak_admin_user }}" \
+          "{{ keycloak_admin_password }}" \
+          "{{ keycloak_realm }}" \
+          "{{ keycloak_client_id }}" \
+          "{{ test_user }}" \
+          "{{ test_password }}"
+      register: realm_minimal_fallback
+      when: (realm_check.status == 404 or realm_check is failed) and (realm_import_result is failed or realm_import_result.rc != 0) and (realm_import_fallback is failed or realm_import_fallback.rc != 0)
+
+    - name: Verify realm import was successful
+      uri:
+        url: "{{ keycloak_base_url }}/admin/realms/{{ keycloak_realm }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_auth_result.json.access_token }}"
+        validate_certs: false
+        status_code: 200
+      register: realm_verify
+      when: (realm_import_result.rc is defined and realm_import_result.rc == 0) or (realm_import_fallback.rc is defined and realm_import_fallback.rc == 0) or (realm_minimal_fallback.rc is defined and realm_minimal_fallback.rc == 0)
+
+    # Task 2: Configure Keycloak-WildFly Integration using Elytron OIDC
+    # Note: Keycloak 26+ no longer provides traditional adapters - using WildFly's built-in Elytron OIDC
+    - name: Configure WildFly Elytron OIDC integration
+      set_fact:
+        adapter_install_result:
+          changed: false
+          msg: "Using WildFly built-in Elytron OIDC (Keycloak 26+ no longer provides adapter ZIP)"
+
+    # Task 3: Configure WildFly security domain for Keycloak
+    - name: Create Keycloak configuration for WildFly
+      copy:
+        dest: "{{ wildfly_home }}/standalone/configuration/keycloak.json"
+        owner: wildfly
+        group: wildfly
+        mode: '0644'
+        content: |
+          {
+            "realm": "{{ keycloak_realm }}",
+            "auth-server-url": "{{ keycloak_base_url }}/",
+            "ssl-required": "external",
+            "resource": "{{ keycloak_client_id }}",
+            "verify-token-audience": true,
+            "credentials": {
+              "secret": "your-client-secret"
+            },
+            "use-resource-role-mappings": true,
+            "confidential-port": 0
+          }
+
+    - name: Configure WildFly Elytron OIDC security subsystem
+      copy:
+        dest: "/tmp/configure-elytron-oidc.cli"
+        content: |
+          embed-server --server-config=standalone.xml
+          
+          # Configure Elytron OIDC client
+          if (outcome != success) of /subsystem=elytron-oidc-client/secure-deployment={{ application_name }}.war:read-resource
+              /subsystem=elytron-oidc-client/secure-deployment={{ application_name }}.war:add(client-id={{ keycloak_client_id }}, provider-url={{ keycloak_base_url }}/realms/{{ keycloak_realm }}, ssl-required=EXTERNAL, public-client=false)
+          end-if
+          
+          # Configure Undertow security domain for OIDC
+          if (outcome != success) of /subsystem=undertow/application-security-domain={{ keycloak_realm }}:read-resource
+              /subsystem=undertow/application-security-domain={{ keycloak_realm }}:add(integrated-jaspi=false)
+          end-if
+          
+          # Configure Elytron security domain  
+          if (outcome != success) of /subsystem=elytron/security-domain={{ keycloak_realm }}:read-resource
+              /subsystem=elytron/security-domain={{ keycloak_realm }}:add(realms=[{realm=ApplicationRealm}], default-realm=ApplicationRealm, permission-mapper=default-permission-mapper)
+          end-if
+          
+          # Map application security domain to Elytron domain
+          /subsystem=undertow/application-security-domain={{ keycloak_realm }}:write-attribute(name=security-domain, value={{ keycloak_realm }})
+          
+          stop-embedded-server
+
+    - name: Apply Elytron OIDC security configuration to WildFly
+      shell: |
+        cd {{ wildfly_home }}
+        ./bin/jboss-cli.sh --file=/tmp/configure-elytron-oidc.cli
+      become_user: wildfly
+      register: security_config_result
+      ignore_errors: yes
+
+    # Task 4: Create web.xml configuration for J2EE application with Elytron OIDC
+    - name: Create Elytron OIDC web.xml configuration template  
+      copy:
+        dest: "/tmp/elytron-oidc-web.xml"
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee 
+                   https://jakarta.ee/xml/ns/jakartaee/web-app_6_0.xsd"
+                   version="6.0">
+
+              <display-name>DurvalCRM Application</display-name>
+
+              <!-- Security constraints -->
+              <security-constraint>
+                  <web-resource-collection>
+                      <web-resource-name>Protected Resources</web-resource-name>
+                      <url-pattern>/api/*</url-pattern>
+                      <http-method>GET</http-method>
+                      <http-method>POST</http-method>
+                      <http-method>PUT</http-method>
+                      <http-method>DELETE</http-method>
+                  </web-resource-collection>
+                  <auth-constraint>
+                      <role-name>user</role-name>
+                  </auth-constraint>
+              </security-constraint>
+
+              <login-config>
+                  <auth-method>OIDC</auth-method>
+              </login-config>
+
+              <security-role>
+                  <role-name>user</role-name>
+              </security-role>
+              
+          </web-app>
+
+    # Task 5: User creation is handled by the Python script above
+
+    # Restart services to apply configurations
+    - name: Restart WildFly to apply Keycloak configuration
+      systemd:
+        name: wildfly
+        state: restarted
+      register: wildfly_restart
+
+    - name: Wait for WildFly to restart with Keycloak integration
+      wait_for:
+        port: 9990
+        host: "127.0.0.1"
+        timeout: 120
+        delay: 20
+      when: wildfly_restart.changed
+
+    # Task 6: Test Authentication Flow
+    - name: Test Keycloak authentication endpoint
+      uri:
+        url: "{{ keycloak_base_url }}/realms/{{ keycloak_realm }}/.well-known/openid-configuration"
+        method: GET
+        validate_certs: false
+        status_code: 200
+      register: oidc_config_test
+
+    - name: Test user authentication with Keycloak
+      uri:
+        url: "{{ keycloak_base_url }}/realms/{{ keycloak_realm }}/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: "{{ keycloak_client_id }}"
+          username: "{{ test_user }}"
+          password: "{{ test_password }}"
+        validate_certs: false
+        status_code: 200
+      register: user_auth_test
+      ignore_errors: yes
+
+    # Display results
+    - name: Display integration results
+      debug:
+        msg: |
+          =================================
+          Keycloak Integration Results:
+          =================================
+          - Realm Import: {{ 'Success (Python)' if realm_import_result.rc is defined and realm_import_result.rc == 0 else ('Success (Curl)' if realm_import_fallback.rc is defined and realm_import_fallback.rc == 0 else ('Success (Minimal)' if realm_minimal_fallback.rc is defined and realm_minimal_fallback.rc == 0 else 'Failed or already exists')) }}
+          - WildFly Adapter: {{ 'Installed' if adapter_install_result is succeeded else 'Already installed' }}
+          - Security Configuration: {{ 'Applied' if security_config_result.changed else 'Already configured' }}
+          - User Created: {{ 'Success' if (realm_import_result.rc is defined and realm_import_result.rc == 0) or (realm_import_fallback.rc is defined and realm_import_fallback.rc == 0) or (realm_minimal_fallback.rc is defined and realm_minimal_fallback.rc == 0) else 'Failed or already exists' }}
+          - Authentication Test: {{ 'Success' if user_auth_test is succeeded else 'Failed' }}
+          
+          Access URLs:
+          - Keycloak Admin: {{ keycloak_base_url }}/admin/
+          - Keycloak Realm: {{ keycloak_base_url }}/realms/{{ keycloak_realm }}
+          - WildFly Admin: https://20.127.155.169:9990
+          
+          Test Credentials:
+          - Username: {{ test_user }}
+          - Password: {{ test_password }}
+          
+          Application Configuration:
+          - Client ID: {{ keycloak_client_id }}
+          - Realm: {{ keycloak_realm }}
+          - Auth URL: {{ keycloak_base_url }}/
+
+    - name: Create deployment instructions
+      copy:
+        dest: "/tmp/keycloak-integration-instructions.txt"
+        content: |
+          DurvalCRM Keycloak Integration Instructions
+          ==========================================
+          
+          1. Keycloak Configuration:
+             - Realm: {{ keycloak_realm }}
+             - Admin Console: {{ keycloak_base_url }}/admin/
+             - Client ID: {{ keycloak_client_id }}
+          
+          2. WildFly Configuration:
+             - Elytron OIDC integration configured
+             - Security domain configured  
+             - Application security enabled
+          
+          3. Application Deployment:
+             - Update web.xml with OIDC auth-method (not KEYCLOAK)
+             - Configure Elytron OIDC secure-deployment in WildFly
+             - Deploy WAR file to WildFly
+          
+          4. Test User:
+             - Username: {{ test_user }}
+             - Password: {{ test_password }}
+          
+          5. Integration Test:
+             - Access protected endpoints: https://20.127.155.169:8443/{{ application_name }}/api/
+             - Should redirect to Keycloak login
+             - Login with test credentials
+             - Access should be granted
+          
+          6. Next Steps:
+             - Configure client secret in Keycloak admin console 
+             - Add role mappings as needed
+             - Configure CORS settings
+             - Set up proper SSL certificates
+             
+          Note: Using WildFly's built-in Elytron OIDC (Keycloak 26+ no longer provides adapter ZIP)
+          Note: Keycloak URLs updated for version 26+ (removed /auth prefix)
+
+    - name: Final verification - check all services
+      shell: |
+        echo "=== Keycloak Status ==="
+        systemctl is-active keycloak || echo "Keycloak not running"
+        echo ""
+        echo "=== WildFly Status ==="
+        systemctl is-active wildfly || echo "WildFly not running"
+        echo ""
+        echo "=== Port Check ==="
+        netstat -tuln | grep -E ':8443|:9443|:9990' || echo "No ports found"
+      register: final_status
+
+    - name: Display final status
+      debug:
+        var: final_status.stdout_lines
