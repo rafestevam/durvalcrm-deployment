@@ -1,6 +1,8 @@
 -- =================================================================
--- SCRIPT DE CRIAÇÃO DO SCHEMA PARA O BANCO 'durvalcrm_dev'
+-- SCRIPT DE CRIAÇÃO DO SCHEMA PARA O BANCO 'durvalcrm'
 -- Baseado nas entidades JPA do projeto
+-- =================================================================
+-- NOTA: Este script deve ser executado no banco durvalcrm
 -- =================================================================
 
 -- Tabela principal para os associados (AssociadoEntity.java)
@@ -107,7 +109,11 @@ CREATE INDEX IF NOT EXISTS idx_doacoes_data_confirmacao ON doacoes(data_confirma
 --     FOR EACH ROW 
 --     EXECUTE FUNCTION update_updated_at_column();
 
--- Grant permissions para o usuário da aplicação (comentado devido ao parser)
+-- Grant permissions para o usuário da aplicação
+-- Nota: As permissões são concedidas pelo playbook Ansible
 -- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO durvalcrm_user;
 -- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO durvalcrm_user;
 -- GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO durvalcrm_user;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO durvalcrm_user;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO durvalcrm_user;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO durvalcrm_user;

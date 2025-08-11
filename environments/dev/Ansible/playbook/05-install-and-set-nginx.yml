@@ -1,0 +1,200 @@
+---
+- name: Install and Configure NGINX Web Server
+  hosts: vm-dev
+  become: yes
+  vars:
+    nginx_user: "nginx"
+    nginx_group: "nginx"
+    nginx_http_port: "9080"
+    nginx_redirect_port: "80"
+    nginx_config_file: "nginx-dev.conf"
+    nginx_service_name: "nginx"
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install NGINX stable/LTS version
+      ansible.builtin.apt:
+        name: 
+          - nginx
+          - nginx-common
+          - nginx-core
+        state: present
+        default_release: "*"
+
+    - name: Check if nginx user exists
+      ansible.builtin.shell: getent passwd nginx
+      register: nginx_user_check
+      failed_when: false
+      changed_when: false
+
+    - name: Check if www-data user exists
+      ansible.builtin.shell: getent passwd www-data
+      register: www_data_user_check
+      failed_when: false
+      changed_when: false
+
+    - name: Set NGINX user and group facts
+      ansible.builtin.set_fact:
+        actual_nginx_user: "{{ 'nginx' if nginx_user_check.rc == 0 else 'www-data' }}"
+        actual_nginx_group: "{{ 'nginx' if nginx_user_check.rc == 0 else 'www-data' }}"
+
+    - name: Stop NGINX service before configuration
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: stopped
+
+    - name: Copy NGINX development configuration file
+      ansible.builtin.copy:
+        src: ../files/nginx/{{ nginx_config_file }}
+        dest: "/tmp/{{ nginx_config_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+
+    - name: Backup original NGINX configuration
+      ansible.builtin.copy:
+        src: /etc/nginx/nginx.conf
+        dest: /etc/nginx/nginx.conf.backup
+        owner: root
+        group: root
+        mode: '0644'
+        remote_src: yes
+        force: no
+
+    - name: Fix NGINX user in configuration file
+      ansible.builtin.replace:
+        path: "/tmp/{{ nginx_config_file }}"
+        regexp: '^user nginx;'
+        replace: "user {{ actual_nginx_user }};"
+        backup: no
+
+    - name: Import NGINX configuration from copied file
+      ansible.builtin.copy:
+        src: "/tmp/{{ nginx_config_file }}"
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+        remote_src: yes
+        backup: yes
+
+    - name: Test NGINX configuration syntax
+      ansible.builtin.command:
+        cmd: nginx -t
+      register: nginx_test_result
+      failed_when: nginx_test_result.rc != 0
+
+    - name: Show NGINX configuration test result
+      ansible.builtin.debug:
+        msg: "NGINX configuration test: {{ 'PASSED' if nginx_test_result.rc == 0 else 'FAILED' }}"
+
+    - name: Create NGINX log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ actual_nginx_user }}"
+        group: "{{ actual_nginx_group }}"
+        mode: '0755'
+      loop:
+        - /var/log/nginx
+
+    - name: Start and enable NGINX service
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for NGINX to start
+      ansible.builtin.wait_for:
+        port: "{{ nginx_http_port }}"
+        host: localhost
+        delay: 3
+        timeout: 30
+
+    - name: Test NGINX HTTP connectivity from localhost
+      ansible.builtin.uri:
+        url: "http://localhost:{{ nginx_http_port }}/health"
+        method: GET
+        status_code: 200
+      register: nginx_local_test
+
+    - name: Show local connectivity test result
+      ansible.builtin.debug:
+        msg: "NGINX HTTP local test - Status: {{ nginx_local_test.status }}"
+
+    - name: Test NGINX port accessibility from external
+      ansible.builtin.wait_for:
+        port: "{{ nginx_http_port }}"
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 2
+        timeout: 10
+        state: started
+      register: nginx_port_test
+
+    - name: Show external port accessibility test result
+      ansible.builtin.debug:
+        msg: "NGINX port {{ nginx_http_port }} is accessible from {{ ansible_default_ipv4.address }}"
+
+    - name: Test NGINX redirect server (port 80)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ nginx_redirect_port }}/health"
+        method: GET
+        status_code: [302, 200]
+        follow_redirects: none
+      register: nginx_redirect_test
+      failed_when: false
+
+    - name: Show redirect server test result
+      ansible.builtin.debug:
+        msg: "NGINX redirect server - Status: {{ nginx_redirect_test.status | default('Not accessible') }}"
+
+    - name: Configure firewall to allow NGINX HTTP connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: "{{ nginx_http_port }}"
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Configure firewall to allow NGINX redirect connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: "{{ nginx_redirect_port }}"
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Verify NGINX status and show service information
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+      register: nginx_status
+
+    - name: Display NGINX connection information
+      ansible.builtin.debug:
+        msg:
+          - "NGINX has been successfully installed and configured"
+          - "Service Status: {{ nginx_status.status.ActiveState }}"
+          - "Main HTTP Port: {{ nginx_http_port }}"
+          - "Redirect Port: {{ nginx_redirect_port }}"
+          - "Configuration File: /etc/nginx/nginx.conf"
+          - "Access URL: http://{{ ansible_default_ipv4.address }}:{{ nginx_http_port }}"
+          - "Health Check: http://{{ ansible_default_ipv4.address }}:{{ nginx_http_port }}/health"
+          - "CRM Application: http://{{ ansible_default_ipv4.address }}:{{ nginx_http_port }}/crm/"
+          - "Keycloak Admin: http://{{ ansible_default_ipv4.address }}:{{ nginx_http_port }}/admin"
+          - "API Endpoint: http://{{ ansible_default_ipv4.address }}:{{ nginx_http_port }}/api/"
+          - "Service Management: systemctl status {{ nginx_service_name }}"
+
+  handlers:
+    - name: restart nginx
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: restarted
+
+    - name: reload nginx
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: reloaded
