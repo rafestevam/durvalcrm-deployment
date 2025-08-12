@@ -114,6 +114,26 @@
       ansible.builtin.set_fact:
         java_home: "{{ java_home_path.stdout | default('/usr/lib/jvm/java-17-openjdk-amd64') }}"
 
+    - name: Copy default standalone.xml as base for durvalcrm configuration
+      ansible.builtin.copy:
+        src: "{{ wildfly_home }}/standalone/configuration/standalone.xml"
+        dest: "{{ wildfly_home }}/standalone/configuration/standalone-durvalcrm.xml"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0644'
+        remote_src: yes
+
+    - name: Ensure WildFly scripts are executable
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/bin/{{ item }}"
+        mode: '0755'
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+      loop:
+        - standalone.sh
+        - jboss-cli.sh
+        - add-user.sh
+
     - name: Copy WildFly systemd service file
       ansible.builtin.copy:
         content: |
@@ -129,7 +149,7 @@
           Environment="JBOSS_HOME={{ wildfly_home }}"
           Environment="WILDFLY_HOME={{ wildfly_home }}"
           Environment="LAUNCH_JBOSS_IN_BACKGROUND=1"
-          ExecStart={{ wildfly_home }}/bin/standalone.sh -b=0.0.0.0 -bmanagement=0.0.0.0
+          ExecStart=/bin/bash -c '{{ wildfly_home }}/bin/standalone.sh -c standalone-durvalcrm.xml -b=0.0.0.0 -bmanagement=0.0.0.0'
           ExecStop={{ wildfly_home }}/bin/jboss-cli.sh --connect --controller=localhost:9990 command=:shutdown
           TimeoutStartSec=600
           TimeoutStopSec=600
@@ -153,13 +173,61 @@
         name: wildfly
         state: started
         enabled: yes
+      register: wildfly_start_result
+
+    - name: Wait for systemd to stabilize
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Check WildFly service status
+      ansible.builtin.systemd:
+        name: wildfly
+      register: wildfly_service_status
+
+    - name: Display WildFly service status
+      ansible.builtin.debug:
+        msg: "WildFly service status: {{ wildfly_service_status.status.ActiveState }}"
+
+    - name: Get WildFly service logs for debugging
+      ansible.builtin.shell: journalctl -u wildfly -n 100 --no-pager
+      register: wildfly_logs
+      changed_when: false
+
+    - name: Display last 20 lines of WildFly logs
+      ansible.builtin.debug:
+        msg: "{{ wildfly_logs.stdout_lines[-20:] }}"
+      when: wildfly_logs.stdout_lines is defined
+
+    - name: Check if standalone.sh exists and is executable
+      ansible.builtin.stat:
+        path: "{{ wildfly_home }}/bin/standalone.sh"
+      register: standalone_script
+
+    - name: Display standalone.sh status
+      ansible.builtin.debug:
+        msg:
+          - "Standalone.sh exists: {{ standalone_script.stat.exists }}"
+          - "Standalone.sh executable: {{ standalone_script.stat.executable | default(false) }}"
+          - "Standalone.sh path: {{ wildfly_home }}/bin/standalone.sh"
+
+    - name: Verify WildFly configuration file
+      ansible.builtin.stat:
+        path: "{{ wildfly_home }}/standalone/configuration/standalone-durvalcrm.xml"
+      register: config_file
+
+    - name: Display configuration file status
+      ansible.builtin.debug:
+        msg:
+          - "Config file exists: {{ config_file.stat.exists }}"
+          - "Config file path: {{ wildfly_home }}/standalone/configuration/standalone-durvalcrm.xml"
 
     - name: Wait for WildFly to start
       ansible.builtin.wait_for:
         port: 8080
         host: localhost
-        delay: 10
-        timeout: 60
+        delay: 30
+        timeout: 300
+        msg: "WildFly is not responding on port 8080 after 300 seconds"
 
     - name: Create WildFly admin user
       ansible.builtin.shell: |
@@ -239,8 +307,8 @@
       ansible.builtin.wait_for:
         port: 8080
         host: localhost
-        delay: 15
-        timeout: 120
+        delay: 30
+        timeout: 300
 
     - name: Verify RBAC configuration
       ansible.builtin.shell: |
@@ -451,8 +519,8 @@
       ansible.builtin.wait_for:
         port: 8080
         host: localhost
-        delay: 10
-        timeout: 60
+        delay: 30
+        timeout: 300
 
     - name: Test WildFly HTTP connectivity from localhost
       ansible.builtin.uri:

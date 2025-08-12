@@ -11,6 +11,9 @@
     cert_organizational_unit: "IT Department"
     cert_validity_days: 365
     cert_key_size: 4096
+    wildfly_home: "/opt/wildfly"
+    wildfly_user: "wildfly"
+    wildfly_group: "wildfly"
 
   tasks:
     - name: Update apt cache
@@ -25,6 +28,7 @@
           - ca-certificates
           - ssl-cert
           - python3-cryptography
+          - default-jdk
         state: present
 
     - name: Create certificate directory in ansible_user home
@@ -98,7 +102,7 @@
         group: "{{ ansible_user }}"
         mode: '0644'
 
-    - name: Create PKCS12 keystore for Java applications (optional)
+    - name: Create PKCS12 keystore for Java applications
       community.crypto.openssl_pkcs12:
         action: export
         path: "/home/{{ ansible_user }}/certificates/keystore.p12"
@@ -109,6 +113,130 @@
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
         mode: '0600'
+
+    # ========== NOVAS TASKS PARA WILDFLY ==========
+
+    - name: Check if WildFly directory exists
+      ansible.builtin.stat:
+        path: "{{ wildfly_home }}"
+      register: wildfly_dir_check
+
+    - name: Create WildFly configuration directory if needed
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/standalone/configuration"
+        state: directory
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0755'
+        recurse: yes
+      when: wildfly_dir_check.stat.exists
+
+    - name: Check if source PKCS12 keystore exists
+      ansible.builtin.stat:
+        path: /home/{{ ansible_user }}/certificates/keystore.p12
+      register: pkcs12_keystore_check
+
+    - name: List contents of PKCS12 keystore
+      ansible.builtin.shell: |
+        keytool -list -keystore /home/{{ ansible_user }}/certificates/keystore.p12 \
+                -storepass changeit -storetype PKCS12 -v | grep -A 5 "Alias name"
+      register: pkcs12_contents
+      when: pkcs12_keystore_check.stat.exists
+      failed_when: false
+      changed_when: false
+
+    - name: Display PKCS12 keystore contents
+      ansible.builtin.debug:
+        msg: 
+          - "PKCS12 keystore exists: {{ pkcs12_keystore_check.stat.exists }}"
+          - "Contents: {{ pkcs12_contents.stdout if pkcs12_contents is defined else 'Could not read' }}"
+      when: pkcs12_keystore_check.stat.exists
+
+    - name: Create JKS keystore for WildFly management realm
+      ansible.builtin.shell: |
+        keytool -importkeystore \
+          -srckeystore /home/{{ ansible_user }}/certificates/keystore.p12 \
+          -srcstoretype PKCS12 \
+          -srcstorepass changeit \
+          -destkeystore {{ wildfly_home }}/certificates/management-staging.keystore \
+          -deststoretype JKS \
+          -deststorepass staging123 \
+          -destkeypass staging123 \
+          -srcalias durvalcrm-cert \
+          -destalias staging-management \
+          -noprompt 2>&1
+      when: wildfly_dir_check.stat.exists and pkcs12_keystore_check.stat.exists
+      register: management_keystore_result
+      failed_when: false
+
+    - name: Display management keystore creation result
+      ansible.builtin.debug:
+        msg:
+          - "Management keystore creation return code: {{ management_keystore_result.rc | default('not executed') }}"
+          - "Output: {{ management_keystore_result.stdout | default('') }}"
+          - "Error: {{ management_keystore_result.stderr | default('') }}"
+      when: management_keystore_result is defined
+
+    - name: Create JKS keystore for WildFly application realm
+      ansible.builtin.shell: |
+        keytool -importkeystore \
+          -srckeystore /home/{{ ansible_user }}/certificates/keystore.p12 \
+          -srcstoretype PKCS12 \
+          -srcstorepass changeit \
+          -destkeystore {{ wildfly_home }}/certificates/application-staging.keystore \
+          -deststoretype JKS \
+          -deststorepass staging123 \
+          -destkeypass staging123 \
+          -srcalias durvalcrm-cert \
+          -destalias staging-app \
+          -noprompt 2>&1
+      when: wildfly_dir_check.stat.exists and pkcs12_keystore_check.stat.exists
+      register: application_keystore_result
+      failed_when: false
+
+    - name: Display application keystore creation result
+      ansible.builtin.debug:
+        msg:
+          - "Application keystore creation return code: {{ application_keystore_result.rc | default('not executed') }}"
+          - "Output: {{ application_keystore_result.stdout | default('') }}"
+          - "Error: {{ application_keystore_result.stderr | default('') }}"
+      when: application_keystore_result is defined
+
+    - name: Set proper ownership and permissions for management keystore
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/certificates/management-staging.keystore"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0600'
+      when: wildfly_dir_check.stat.exists and management_keystore_result.rc == 0
+
+    - name: Set proper ownership and permissions for application keystore
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/certificates/application-staging.keystore"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0600'
+      when: wildfly_dir_check.stat.exists and application_keystore_result.rc == 0
+
+    - name: Verify management keystore was created successfully
+      ansible.builtin.shell: |
+        keytool -list -keystore {{ wildfly_home }}/certificates/management-staging.keystore \
+                -storepass staging123 -alias staging-management
+      register: management_keystore_verify
+      when: wildfly_dir_check.stat.exists and management_keystore_result.rc == 0
+      failed_when: false
+      changed_when: false
+
+    - name: Verify application keystore was created successfully
+      ansible.builtin.shell: |
+        keytool -list -keystore {{ wildfly_home }}/certificates/application-staging.keystore \
+                -storepass staging123 -alias staging-app
+      register: application_keystore_verify
+      when: wildfly_dir_check.stat.exists and application_keystore_result.rc == 0
+      failed_when: false
+      changed_when: false
+
+    # ========== INFORMAÇÕES E VERIFICAÇÕES ==========
 
     - name: Generate certificate information file
       ansible.builtin.copy:
@@ -128,6 +256,10 @@
           - server.pem: Combined certificate and key (for Nginx, HAProxy, etc.)
           - dhparam.pem: Diffie-Hellman parameters
           - keystore.p12: PKCS12 keystore for Java applications (password: changeit)
+          
+          WildFly Keystores (if WildFly is installed):
+          - management-staging.keystore: JKS keystore for WildFly management (password: staging123, alias: staging-management)
+          - application-staging.keystore: JKS keystore for WildFly application (password: staging123, alias: staging-app)
           
           Certificate Details:
           --------------------
@@ -157,6 +289,7 @@
           
           Java/Keycloak/WildFly:
             Use keystore.p12 with password: changeit
+            OR use WildFly-specific JKS keystores with password: staging123
         dest: "/home/{{ ansible_user }}/certificates/README.txt"
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
@@ -175,6 +308,34 @@
           - "  - keystore.p12: Java keystore (password: changeit)"
           - "Certificate is valid for {{ cert_validity_days }} days"
           - "Certificate CN: {{ cert_common_name }}"
+
+    - name: Display WildFly keystore information
+      ansible.builtin.debug:
+        msg:
+          - "WildFly keystores created successfully:"
+          - "  - Management keystore: {{ wildfly_home }}/certificates/management-staging.keystore"
+          - "  - Application keystore: {{ wildfly_home }}/certificates/application-staging.keystore"
+          - "  - Password: staging123"
+          - "  - Management alias: staging-management"
+          - "  - Application alias: staging-app"
+      when: wildfly_dir_check.stat.exists and management_keystore_result.rc == 0 and application_keystore_result.rc == 0
+
+    - name: Display WildFly keystore warnings
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: Some WildFly keystores failed to create:"
+          - "  - Management keystore result: {{ 'SUCCESS' if management_keystore_result.rc == 0 else 'FAILED' }}"
+          - "  - Application keystore result: {{ 'SUCCESS' if application_keystore_result.rc == 0 else 'FAILED' }}"
+          - "Check the logs above for detailed error messages"
+      when: wildfly_dir_check.stat.exists and (management_keystore_result.rc != 0 or application_keystore_result.rc != 0)
+
+    - name: Display WildFly not found message
+      ansible.builtin.debug:
+        msg:
+          - "WildFly directory not found at {{ wildfly_home }}"
+          - "WildFly keystores were not created"
+          - "Run this playbook again after WildFly installation"
+      when: not wildfly_dir_check.stat.exists
 
     - name: Verify certificate validity
       ansible.builtin.shell: |
@@ -196,3 +357,13 @@
     - name: Show certificate verification result
       ansible.builtin.debug:
         msg: "Certificate verification: {{ cert_verify.stdout }}"
+
+    - name: Show keystore verification results
+      ansible.builtin.debug:
+        msg:
+          - "Management keystore verification:"
+          - "{{ management_keystore_verify.stdout if (management_keystore_verify is defined and management_keystore_verify.rc is defined and management_keystore_verify.rc == 0) else 'Verification failed or skipped' }}"
+          - ""
+          - "Application keystore verification:"
+          - "{{ application_keystore_verify.stdout if (application_keystore_verify is defined and application_keystore_verify.rc is defined and application_keystore_verify.rc == 0) else 'Verification failed or skipped' }}"
+      when: wildfly_dir_check.stat.exists
