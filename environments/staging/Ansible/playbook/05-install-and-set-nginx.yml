@@ -1,0 +1,315 @@
+---
+- name: Install and Configure NGINX Web Server
+  hosts: vm-staging
+  become: yes
+  vars:
+    nginx_user: "nginx"
+    nginx_group: "nginx"
+    # nginx_http_port: "9080"  # Not used - NGINX only listens on HTTPS 9443
+    # nginx_redirect_port: "80"  # Not used - NGINX only listens on HTTPS 9443
+    nginx_https_port: "9443"  # Main HTTPS port for all services
+    nginx_config_file: "nginx-staging.conf"
+    nginx_service_name: "nginx"
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install NGINX stable/LTS version
+      ansible.builtin.apt:
+        name: 
+          - nginx
+          - nginx-common
+          - nginx-core
+        state: present
+        default_release: "*"
+
+    - name: Check if nginx user exists
+      ansible.builtin.shell: getent passwd nginx
+      register: nginx_user_check
+      failed_when: false
+      changed_when: false
+
+    - name: Check if www-data user exists
+      ansible.builtin.shell: getent passwd www-data
+      register: www_data_user_check
+      failed_when: false
+      changed_when: false
+
+    - name: Set NGINX user and group facts
+      ansible.builtin.set_fact:
+        actual_nginx_user: "{{ 'nginx' if nginx_user_check.rc == 0 else 'www-data' }}"
+        actual_nginx_group: "{{ 'nginx' if nginx_user_check.rc == 0 else 'www-data' }}"
+
+    - name: Stop NGINX service before configuration
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: stopped
+
+    - name: Copy NGINX development configuration file
+      ansible.builtin.copy:
+        src: ../files/nginx/{{ nginx_config_file }}
+        dest: "/tmp/{{ nginx_config_file }}"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+
+    - name: Backup original NGINX configuration
+      ansible.builtin.copy:
+        src: /etc/nginx/nginx.conf
+        dest: /etc/nginx/nginx.conf.backup
+        owner: root
+        group: root
+        mode: '0644'
+        remote_src: yes
+        force: no
+
+    - name: Fix NGINX user in configuration file
+      ansible.builtin.replace:
+        path: "/tmp/{{ nginx_config_file }}"
+        regexp: '^user nginx;'
+        replace: "user {{ actual_nginx_user }};"
+        backup: no
+
+    - name: Import NGINX configuration from copied file
+      ansible.builtin.copy:
+        src: "/tmp/{{ nginx_config_file }}"
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+        remote_src: yes
+        backup: yes
+
+    - name: Create certificates directory
+      ansible.builtin.file:
+        path: /home/vagrant/certificates
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
+    - name: Generate self-signed SSL certificate
+      ansible.builtin.command:
+        cmd: openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /home/vagrant/certificates/server.key -out /home/vagrant/certificates/server.crt -subj "/C=BR/ST=SP/L=SaoPaulo/O=DurvalCRM/OU=IT/CN=localhost"
+        creates: /home/vagrant/certificates/server.crt
+
+    - name: Set proper permissions for SSL certificates
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: vagrant
+        group: vagrant
+        mode: '0600'
+      loop:
+        - /home/vagrant/certificates/server.key
+        - /home/vagrant/certificates/server.crt
+
+    - name: Test NGINX configuration syntax
+      ansible.builtin.command:
+        cmd: nginx -t
+      register: nginx_test_result
+      failed_when: nginx_test_result.rc != 0
+
+    - name: Show NGINX configuration test result
+      ansible.builtin.debug:
+        msg: "NGINX configuration test: {{ 'PASSED' if nginx_test_result.rc == 0 else 'FAILED' }}"
+
+    - name: Create NGINX log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ actual_nginx_user }}"
+        group: "{{ actual_nginx_group }}"
+        mode: '0755'
+      loop:
+        - /var/log/nginx
+
+    - name: Check for processes using NGINX ports
+      ansible.builtin.shell: |
+        for port in 9443; do
+          pid=$(lsof -t -i:$port 2>/dev/null || true)
+          if [ ! -z "$pid" ]; then
+            echo "Port $port is being used by process $pid"
+            ps -p $pid -o comm= 2>/dev/null || echo "Process $pid not found"
+          fi
+        done
+      register: port_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show port usage information
+      ansible.builtin.debug:
+        msg: "{{ port_check.stdout_lines }}"
+      when: port_check.stdout_lines | length > 0
+
+    - name: Kill processes using NGINX ports (if any)
+      ansible.builtin.shell: |
+        for port in 9443; do
+          pid=$(lsof -t -i:$port 2>/dev/null || true)
+          if [ ! -z "$pid" ]; then
+            echo "Killing process $pid using port $port"
+            kill -9 $pid 2>/dev/null || true
+          fi
+        done
+      register: kill_result
+      changed_when: kill_result.stdout != ""
+      failed_when: false
+
+    - name: Wait a moment after killing processes
+      ansible.builtin.pause:
+        seconds: 3
+      when: kill_result.changed
+
+    - name: Check backend services connectivity
+      ansible.builtin.uri:
+        url: "{{ item.url }}"
+        method: GET
+        validate_certs: no
+        status_code: [200, 302, 404, 503]
+        timeout: 10
+      register: backend_check
+      failed_when: false
+      loop:
+        - { name: "Keycloak HTTPS", url: "https://127.0.0.1:8543" }
+        - { name: "Keycloak HTTP", url: "http://127.0.0.1:8090" }
+        - { name: "WildFly HTTPS", url: "https://127.0.0.1:8443" }
+        - { name: "WildFly HTTP", url: "http://127.0.0.1:8080" }
+        - { name: "Vite Dev", url: "http://127.0.0.1:5173" }
+
+    - name: Show backend connectivity status
+      ansible.builtin.debug:
+        msg: 
+          - "Backend Service: {{ item.item.name }}"
+          - "URL: {{ item.item.url }}"
+          - "Status: {{ item.status | default('Connection failed') }}"
+          - "Accessible: {{ 'Yes' if item.status is defined else 'No' }}"
+      loop: "{{ backend_check.results }}"
+
+    - name: Test specific Keycloak admin endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8090/admin"
+        method: GET
+        validate_certs: no
+        follow_redirects: none
+        status_code: [200, 302, 404, 503]
+        timeout: 10
+      register: keycloak_admin_test
+      failed_when: false
+
+    - name: Show Keycloak admin endpoint test
+      ansible.builtin.debug:
+        msg:
+          - "Keycloak Admin Endpoint Test:"
+          - "URL: http://127.0.0.1:8090/admin"
+          - "Status: {{ keycloak_admin_test.status | default('Connection failed') }}"
+          - "Location header: {{ keycloak_admin_test.location | default('Not present') }}"
+
+    - name: Start and enable NGINX service
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      register: nginx_start_result
+      failed_when: false
+
+    - name: Get NGINX service status if start failed
+      ansible.builtin.command: systemctl status nginx.service
+      register: nginx_status_output
+      when: nginx_start_result.failed
+      failed_when: false
+
+    - name: Get NGINX journal logs if start failed
+      ansible.builtin.command: journalctl -xeu nginx.service --no-pager -l
+      register: nginx_journal_output
+      when: nginx_start_result.failed
+      failed_when: false
+
+    - name: Show NGINX error details
+      ansible.builtin.debug:
+        msg:
+          - "NGINX service start failed!"
+          - "Status output:"
+          - "{{ nginx_status_output.stdout_lines | default([]) }}"
+          - "Journal logs:"
+          - "{{ nginx_journal_output.stdout_lines | default([]) }}"
+      when: nginx_start_result.failed
+
+    - name: Fail if NGINX couldn't start
+      ansible.builtin.fail:
+        msg: "NGINX service failed to start. Check the debug output above for details."
+      when: nginx_start_result.failed
+
+    - name: Wait for NGINX HTTPS to start
+      ansible.builtin.wait_for:
+        port: "9443"
+        host: localhost
+        delay: 3
+        timeout: 30
+
+    - name: Test NGINX HTTPS connectivity from localhost
+      ansible.builtin.uri:
+        url: "https://localhost:9443/health"
+        method: GET
+        status_code: 200
+        validate_certs: no
+      register: nginx_local_test
+
+    - name: Show local connectivity test result
+      ansible.builtin.debug:
+        msg: "NGINX HTTPS local test - Status: {{ nginx_local_test.status }}"
+
+    - name: Test NGINX HTTPS port accessibility from external
+      ansible.builtin.wait_for:
+        port: "9443"
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 2
+        timeout: 10
+        state: started
+      register: nginx_port_test
+
+    - name: Show external port accessibility test result
+      ansible.builtin.debug:
+        msg: "NGINX HTTPS port 9443 is accessible from {{ ansible_default_ipv4.address }}"
+
+    - name: Configure firewall to allow NGINX HTTPS connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: "9443"
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Verify NGINX status and show service information
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+      register: nginx_status
+
+    - name: Display NGINX connection information
+      ansible.builtin.debug:
+        msg:
+          - "NGINX has been successfully installed and configured"
+          - "Service Status: {{ nginx_status.status.ActiveState }}"
+          - "HTTPS Port: 9443 (SSL/TLS only)"
+          - "Configuration File: /etc/nginx/nginx.conf"
+          - "Access URL (HTTPS): https://{{ ansible_default_ipv4.address }}:9443"
+          - "Health Check: https://{{ ansible_default_ipv4.address }}:9443/health"
+          - "CRM Application: https://{{ ansible_default_ipv4.address }}:9443/crm/"
+          - "Keycloak Admin: https://{{ ansible_default_ipv4.address }}:9443/admin"
+          - "API Endpoint: https://{{ ansible_default_ipv4.address }}:9443/api/"
+          - "WildFly Management: https://{{ ansible_default_ipv4.address }}:9443/wildfly/"
+          - "Note: All services are accessible only through HTTPS on port 9443"
+          - "Service Management: systemctl status {{ nginx_service_name }}"
+
+  handlers:
+    - name: restart nginx
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: restarted
+
+    - name: reload nginx
+      ansible.builtin.systemd:
+        name: "{{ nginx_service_name }}"
+        state: reloaded

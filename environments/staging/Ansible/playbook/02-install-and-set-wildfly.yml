@@ -1,0 +1,439 @@
+---
+- name: Install and Configure WildFly Application Server
+  hosts: vm-staging
+  become: yes
+  vars:
+    wildfly_version: "37.0.0.Final"
+    wildfly_download_url: "https://github.com/wildfly/wildfly/releases/download/37.0.0.Final/wildfly-37.0.0.Final.tar.gz"
+    wildfly_home: "/opt/wildfly"
+    wildfly_user: "wildfly"
+    wildfly_group: "wildfly"
+    wildfly_admin_user: "admin"
+    wildfly_admin_password: "admin123"
+    java_package: "openjdk-17-jdk"
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Java OpenJDK 17
+      ansible.builtin.apt:
+        name: "{{ java_package }}"
+        state: present
+
+    - name: Verify Java installation
+      ansible.builtin.command: java -version
+      register: java_version
+      changed_when: false
+
+    - name: Display Java version
+      ansible.builtin.debug:
+        msg: "Java version: {{ java_version.stderr }}"
+
+    - name: Install required packages for WildFly
+      ansible.builtin.apt:
+        name:
+          - wget
+          - tar
+          - unzip
+          - curl
+        state: present
+
+    - name: Create WildFly group
+      ansible.builtin.group:
+        name: "{{ wildfly_group }}"
+        state: present
+
+    - name: Create WildFly user
+      ansible.builtin.user:
+        name: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        home: "{{ wildfly_home }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+        state: present
+
+    - name: Check if WildFly is already downloaded
+      ansible.builtin.stat:
+        path: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+      register: wildfly_archive
+
+    - name: Download WildFly
+      ansible.builtin.get_url:
+        url: "{{ wildfly_download_url }}"
+        dest: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+        mode: '0644'
+      when: not wildfly_archive.stat.exists
+
+    - name: Extract WildFly archive
+      ansible.builtin.unarchive:
+        src: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+        dest: /opt
+        remote_src: yes
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        creates: "/opt/wildfly-{{ wildfly_version }}"
+
+    - name: Check if WildFly home exists
+      ansible.builtin.stat:
+        path: "{{ wildfly_home }}"
+      register: wildfly_home_stat
+
+    - name: Remove existing WildFly home if it's not a symlink
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}"
+        state: absent
+      when: wildfly_home_stat.stat.exists and not wildfly_home_stat.stat.islnk
+
+    - name: Create symbolic link to WildFly home
+      ansible.builtin.file:
+        src: "/opt/wildfly-{{ wildfly_version }}"
+        dest: "{{ wildfly_home }}"
+        state: link
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+
+    - name: Set WildFly directory permissions
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        recurse: yes
+        state: directory
+
+    - name: Find Java home directory
+      ansible.builtin.shell: |
+        update-java-alternatives -l | grep java-17-openjdk | awk '{print $3}'
+      register: java_home_path
+      changed_when: false
+
+    - name: Set Java home fact
+      ansible.builtin.set_fact:
+        java_home: "{{ java_home_path.stdout | default('/usr/lib/jvm/java-17-openjdk-amd64') }}"
+
+    - name: Copy WildFly systemd service file
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=WildFly Application Server
+          After=network.target syslog.target
+
+          [Service]
+          Type=simple
+          User={{ wildfly_user }}
+          Group={{ wildfly_group }}
+          Environment="JAVA_HOME={{ java_home }}"
+          Environment="JBOSS_HOME={{ wildfly_home }}"
+          Environment="WILDFLY_HOME={{ wildfly_home }}"
+          Environment="LAUNCH_JBOSS_IN_BACKGROUND=1"
+          ExecStart={{ wildfly_home }}/bin/standalone.sh -b=0.0.0.0 -bmanagement=0.0.0.0
+          ExecStop={{ wildfly_home }}/bin/jboss-cli.sh --connect --controller=localhost:9990 command=:shutdown
+          TimeoutStartSec=600
+          TimeoutStopSec=600
+          Restart=on-failure
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=wildfly
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/wildfly.service
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Start and enable WildFly service
+      ansible.builtin.systemd:
+        name: wildfly
+        state: started
+        enabled: yes
+
+    - name: Wait for WildFly to start
+      ansible.builtin.wait_for:
+        port: 8080
+        host: localhost
+        delay: 10
+        timeout: 60
+
+    - name: Create WildFly admin user
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/add-user.sh -u {{ wildfly_admin_user }} -p {{ wildfly_admin_password }} -g admin -s
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: add_user_result
+      failed_when: false
+
+    - name: Show admin user creation result
+      ansible.builtin.debug:
+        msg: "Admin user creation result: {{ add_user_result.stdout }}"
+      when: add_user_result.stdout is defined
+
+    - name: Download PostgreSQL JDBC driver
+      ansible.builtin.get_url:
+        url: "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
+        dest: "/tmp/postgresql-42.7.4.jar"
+        mode: '0644'
+      register: jdbc_download
+      retries: 3
+      delay: 5
+
+    - name: Copy PostgreSQL driver installation CLI script
+      ansible.builtin.copy:
+        src: ../files/wildfly/install-postgresql-driver.cli
+        dest: "/tmp/install-postgresql-driver.cli"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0644'
+
+    - name: Copy datasource configuration CLI script
+      ansible.builtin.copy:
+        src: ../files/wildfly/configure-datasource.cli
+        dest: "/tmp/configure-datasource.cli"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0644'
+
+    - name: Copy configure-durvalcrm-env.cli to WildFly server
+      ansible.builtin.copy:
+        src: ../files/wildfly/configure-durvalcrm-env.cli
+        dest: "/tmp/configure-durvalcrm-env.cli"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0644'
+
+    - name: Create PostgreSQL module directory
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/modules/system/layers/base/org/postgresql/main"
+        state: directory
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0755'
+        recurse: yes
+
+    - name: Copy PostgreSQL JDBC driver to module directory
+      ansible.builtin.copy:
+        src: "/tmp/postgresql-42.7.4.jar"
+        dest: "{{ wildfly_home }}/modules/system/layers/base/org/postgresql/main/postgresql-42.7.4.jar"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0644'
+        remote_src: yes
+
+    - name: Create PostgreSQL module.xml
+      ansible.builtin.copy:
+        content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <module xmlns="urn:jboss:module:1.3" name="org.postgresql">
+            <resources>
+              <resource-root path="postgresql-42.7.4.jar"/>
+            </resources>
+            <dependencies>
+              <module name="javax.api"/>
+              <module name="javax.transaction.api"/>
+            </dependencies>
+          </module>
+        dest: "{{ wildfly_home }}/modules/system/layers/base/org/postgresql/main/module.xml"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: '0644'
+
+    - name: Install PostgreSQL JDBC driver
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --file=/tmp/install-postgresql-driver.cli
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: driver_install_result
+      failed_when: false
+      retries: 3
+      delay: 5
+
+    - name: Show PostgreSQL driver installation result
+      ansible.builtin.debug:
+        msg: "PostgreSQL driver installation: {{ driver_install_result.stdout }}"
+      when: driver_install_result.stdout is defined
+
+    - name: Wait for WildFly to be ready for datasource configuration
+      ansible.builtin.wait_for:
+        port: 8080
+        host: localhost
+        delay: 5
+        timeout: 30
+
+    - name: Check if datasource already exists
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/subsystem=datasources/data-source=DurvalCRMDS:read-resource"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: datasource_check
+      failed_when: false
+      changed_when: false
+
+    - name: Configure datasource if not exists
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --file=/tmp/configure-datasource.cli
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: datasource_result
+      when: datasource_check.rc != 0
+      retries: 3
+      delay: 5
+      until: datasource_result.rc == 0
+
+    - name: Configure datasource using individual commands if script fails
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/subsystem=datasources/data-source=DurvalCRMDS:add(jndi-name=java:jboss/datasources/DurvalCRMDS,driver-name=postgresql,connection-url=jdbc:postgresql://localhost:5432/durvalcrm,user-name=durvalcrm_user,password=durvalcrm@2025,min-pool-size=5,max-pool-size=20)"
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/subsystem=datasources/data-source=DurvalCRMDS:enable"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: datasource_manual_result
+      when: datasource_check.rc != 0 and (datasource_result is not defined or datasource_result.rc != 0)
+      failed_when: false
+
+    - name: Show datasource configuration result
+      ansible.builtin.debug:
+        msg: 
+          - "Datasource status: {{ 'Already exists' if datasource_check.rc == 0 else 'Created via script' if datasource_result is defined and datasource_result.rc == 0 else 'Created via manual commands' if datasource_manual_result is defined else 'Failed to create' }}"
+          - "Script output: {{ datasource_result.stdout | default('N/A') }}"
+          - "Manual output: {{ datasource_manual_result.stdout | default('N/A') }}"
+
+    - name: Execute WildFly CLI configuration script
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --file=/tmp/configure-durvalcrm-env.cli
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: cli_result
+      failed_when: false
+      retries: 3
+      delay: 10
+
+    - name: Show CLI configuration result
+      ansible.builtin.debug:
+        msg: "CLI configuration result: {{ cli_result.stdout }}"
+      when: cli_result.stdout is defined
+
+    - name: Verify datasource configuration
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/subsystem=datasources/data-source=DurvalCRMDS:read-resource"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: datasource_verify
+      failed_when: false
+
+    - name: Test datasource connection
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/subsystem=datasources/data-source=DurvalCRMDS:test-connection-in-pool"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: datasource_test
+      failed_when: false
+
+    - name: Show datasource verification result
+      ansible.builtin.debug:
+        msg: 
+          - "Datasource verification: {{ 'SUCCESS - DurvalCRMDS is configured' if datasource_verify.rc == 0 else 'FAILED - DurvalCRMDS not found' }}"
+          - "Connection test: {{ 'SUCCESS - Database connection works' if datasource_test.rc == 0 else 'FAILED - Cannot connect to database' }}"
+
+    - name: Restart WildFly to apply configuration
+      ansible.builtin.systemd:
+        name: wildfly
+        state: restarted
+
+    - name: Wait for WildFly to restart
+      ansible.builtin.wait_for:
+        port: 8080
+        host: localhost
+        delay: 10
+        timeout: 60
+
+    - name: Test WildFly HTTP connectivity from localhost
+      ansible.builtin.uri:
+        url: "http://localhost:8080"
+        method: GET
+        status_code: [200, 302, 404]
+      register: wildfly_local_test
+
+    - name: Show local connectivity test result
+      ansible.builtin.debug:
+        msg: "WildFly HTTP local test - Status: {{ wildfly_local_test.status }}"
+
+    - name: Test WildFly port accessibility from external
+      ansible.builtin.wait_for:
+        port: 8080
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 2
+        timeout: 10
+        state: started
+      register: wildfly_port_test
+
+    - name: Show external port accessibility test result
+      ansible.builtin.debug:
+        msg: "WildFly port 8080 is accessible from {{ ansible_default_ipv4.address }}"
+
+    - name: Test WildFly management console connectivity
+      ansible.builtin.uri:
+        url: "http://localhost:9990"
+        method: GET
+        status_code: [200, 401]
+      register: management_test
+      failed_when: false
+
+    - name: Show management console test result
+      ansible.builtin.debug:
+        msg: "WildFly Management Console - Status: {{ management_test.status }}"
+      when: management_test.status is defined
+
+    - name: Configure firewall to allow WildFly HTTP connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: '8080'
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Configure firewall to allow WildFly management connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: '9990'
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Display WildFly connection information
+      ansible.builtin.debug:
+        msg:
+          - "WildFly has been successfully installed and configured"
+          - "Version: {{ wildfly_version }}"
+          - "Home Directory: {{ wildfly_home }}"
+          - "HTTP Port: 8080"
+          - "Management Port: 9990"
+          - "Admin User: {{ wildfly_admin_user }}"
+          - "Admin Password: {{ wildfly_admin_password }}"
+          - "HTTP URL: http://{{ ansible_default_ipv4.address }}:8080"
+          - "Management Console: http://{{ ansible_default_ipv4.address }}:9990"
+          - "Service: systemctl status wildfly"
+
+  handlers:
+    - name: restart wildfly
+      ansible.builtin.systemd:
+        name: wildfly
+        state: restarted

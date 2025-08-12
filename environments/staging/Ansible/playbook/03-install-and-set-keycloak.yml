@@ -1,0 +1,603 @@
+---
+- name: Install and Configure Keycloak Identity Provider
+  hosts: vm-staging
+  become: yes
+  vars:
+    keycloak_version: "26.0.7"
+    keycloak_download_url: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"
+    keycloak_home: "/opt/keycloak"
+    keycloak_user: "keycloak"
+    keycloak_group: "keycloak"
+    keycloak_admin_user: "admin"
+    keycloak_admin_password: "admin"
+    keycloak_http_port: "8090"
+    keycloak_https_port: "8543"
+    keycloak_management_port: "9990"
+    keycloak_db_name: "keycloak"
+    keycloak_db_user: "keycloak_user"
+    keycloak_db_password: "keycloak@2025"
+    postgres_host: "localhost"
+    postgres_port: "5432"
+    postgres_admin_user: "postgres"
+    postgres_admin_password: "postgres"
+    # Client configuration variables - Updated for HTTPS 9443
+    client_name: "durvalcrm-app"
+    app_base_url_localhost: "https://localhost:9443"
+    app_base_url_127: "https://127.0.0.1:9443"
+    app_context_path: "/crm"
+    redirect_uris:
+      - "{{ app_base_url_localhost }}{{ app_context_path }}/*"
+      - "{{ app_base_url_127 }}{{ app_context_path }}/*"
+      - "{{ app_base_url_localhost }}/admin/*"
+      - "{{ app_base_url_127 }}/admin/*"
+    web_origins:
+      - "{{ app_base_url_localhost }}"
+      - "{{ app_base_url_127 }}"
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - python3-psycopg2
+          - postgresql-client
+        state: present
+
+    - name: Create Keycloak database user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_user:
+        name: "{{ keycloak_db_user }}"
+        password: "{{ keycloak_db_password }}"
+        encrypted: yes
+        state: present
+
+    - name: Create Keycloak database
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_db:
+        name: "{{ keycloak_db_name }}"
+        encoding: UTF-8
+        lc_collate: en_US.UTF-8
+        lc_ctype: en_US.UTF-8
+        template: template0
+        owner: "{{ keycloak_db_user }}"
+        state: present
+
+    - name: Grant all privileges on Keycloak database to keycloak_user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: "{{ keycloak_db_name }}"
+        roles: "{{ keycloak_db_user }}"
+        type: database
+        privs: ALL
+        state: present
+
+    - name: Create Keycloak group
+      ansible.builtin.group:
+        name: "{{ keycloak_group }}"
+        state: present
+
+    - name: Create Keycloak user
+      ansible.builtin.user:
+        name: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+        home: "{{ keycloak_home }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+        state: present
+
+    - name: Check if Keycloak is already downloaded
+      ansible.builtin.stat:
+        path: "/tmp/keycloak-{{ keycloak_version }}.tar.gz"
+      register: keycloak_archive
+
+    - name: Download Keycloak
+      ansible.builtin.get_url:
+        url: "{{ keycloak_download_url }}"
+        dest: "/tmp/keycloak-{{ keycloak_version }}.tar.gz"
+        mode: '0644'
+      when: not keycloak_archive.stat.exists
+
+    - name: Extract Keycloak archive
+      ansible.builtin.unarchive:
+        src: "/tmp/keycloak-{{ keycloak_version }}.tar.gz"
+        dest: /opt
+        remote_src: yes
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+        creates: "/opt/keycloak-{{ keycloak_version }}"
+
+    - name: Check if Keycloak home exists
+      ansible.builtin.stat:
+        path: "{{ keycloak_home }}"
+      register: keycloak_home_stat
+
+    - name: Remove existing Keycloak home if it's not a symlink
+      ansible.builtin.file:
+        path: "{{ keycloak_home }}"
+        state: absent
+      when: keycloak_home_stat.stat.exists and not keycloak_home_stat.stat.islnk
+
+    - name: Create symbolic link to Keycloak home
+      ansible.builtin.file:
+        src: "/opt/keycloak-{{ keycloak_version }}"
+        dest: "{{ keycloak_home }}"
+        state: link
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+
+    - name: Set Keycloak directory permissions
+      ansible.builtin.file:
+        path: "{{ keycloak_home }}"
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+        recurse: yes
+        state: directory
+
+
+    - name: Find Java home directory
+      ansible.builtin.shell: |
+        update-java-alternatives -l | grep java-.*17.*-openjdk | awk '{print $3}' | head -1
+      register: java_home_path
+      changed_when: false
+
+    - name: Set Java home fact
+      ansible.builtin.set_fact:
+        java_home: "{{ java_home_path.stdout | default('/usr/lib/jvm/java-1.17.0-openjdk-arm64') }}"
+
+    - name: Create Keycloak configuration file
+      ansible.builtin.copy:
+        content: |
+          # Keycloak Database Configuration
+          db=postgres
+          db-url=jdbc:postgresql://{{ postgres_host }}:{{ postgres_port }}/{{ keycloak_db_name }}
+          db-username={{ keycloak_db_user }}
+          db-password={{ keycloak_db_password }}
+          
+          # HTTP Configuration
+          http-enabled=true
+          http-host=0.0.0.0
+          http-port={{ keycloak_http_port }}
+          
+          # HTTPS Configuration  
+          https-port={{ keycloak_https_port }}
+          
+          # Hostname Configuration - Force HTTPS
+          hostname=localhost
+          hostname-port=9443
+          hostname-url=https://localhost:9443
+          hostname-admin-url=https://localhost:9443
+          hostname-strict=true
+          hostname-strict-https=true
+          
+          # Proxy Configuration - Edge proxy with X-Forwarded headers
+          proxy=edge
+          proxy-headers=xforwarded
+          
+          # SSL/TLS Configuration
+          https-protocols=TLSv1.3,TLSv1.2
+          
+          # Features
+          features=token-exchange,admin-fine-grained-authz
+        dest: "{{ keycloak_home }}/conf/keycloak.conf"
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_group }}"
+        mode: '0600'
+
+    - name: Build Keycloak optimized server
+      ansible.builtin.shell: |
+        cd {{ keycloak_home }}
+        ./bin/kc.sh build
+      become: yes
+      become_user: "{{ keycloak_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: build_result
+      changed_when: false
+
+    - name: Create Keycloak systemd service file
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=Keycloak Identity Provider
+          After=network.target postgresql.service
+          Wants=postgresql.service
+
+          [Service]
+          Type=simple
+          User={{ keycloak_user }}
+          Group={{ keycloak_group }}
+          Environment="JAVA_HOME={{ java_home }}"
+          Environment="KEYCLOAK_HOME={{ keycloak_home }}"
+          Environment="KEYCLOAK_ADMIN={{ keycloak_admin_user }}"
+          Environment="KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }}"
+          Environment="KC_HOSTNAME=localhost"
+          Environment="KC_HOSTNAME_PORT=9443"
+          Environment="KC_HOSTNAME_URL=https://localhost:9443"
+          Environment="KC_HOSTNAME_ADMIN_URL=https://localhost:9443"
+          Environment="KC_HOSTNAME_STRICT=true"
+          Environment="KC_HOSTNAME_STRICT_HTTPS=true"
+          Environment="KC_PROXY=edge"
+          Environment="KC_PROXY_HEADERS=xforwarded"
+          ExecStart={{ keycloak_home }}/bin/kc.sh start
+          ExecStop={{ keycloak_home }}/bin/kc.sh stop
+          TimeoutStartSec=600
+          TimeoutStopSec=600
+          Restart=on-failure
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=keycloak
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/keycloak.service
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Build Keycloak configuration
+      ansible.builtin.command:
+        cmd: "{{ keycloak_home }}/bin/kc.sh build --db=postgres"
+      become_user: "{{ keycloak_user }}"
+      register: keycloak_build_result
+      changed_when: true
+      failed_when: false
+
+    - name: Check Keycloak configuration file content
+      ansible.builtin.debug:
+        msg: 
+          - "Keycloak configuration created at: {{ keycloak_home }}/conf/keycloak.conf"
+          - "Key settings:"
+          - "  - hostname=localhost:9443"
+          - "  - hostname-admin-url=https://localhost:9443" 
+          - "  - proxy=edge"
+          - "  - http-enabled=true on port {{ keycloak_http_port }}"
+
+    - name: Show Keycloak build result
+      ansible.builtin.debug:
+        msg: 
+          - "Build command executed: {{ keycloak_home }}/bin/kc.sh build --db=postgres"
+          - "Return code: {{ keycloak_build_result.rc }}"
+          - "STDOUT: {{ keycloak_build_result.stdout_lines }}"
+          - "STDERR: {{ keycloak_build_result.stderr_lines }}"
+
+    - name: Fail if build failed
+      ansible.builtin.fail:
+        msg: "Keycloak build failed with return code {{ keycloak_build_result.rc }}"
+      when: keycloak_build_result.rc != 0
+
+    - name: Stop Keycloak service if running
+      ansible.builtin.systemd:
+        name: keycloak
+        state: stopped
+      failed_when: false
+
+    - name: Start and enable Keycloak service
+      ansible.builtin.systemd:
+        name: keycloak
+        state: started
+        enabled: yes
+      register: keycloak_start_result
+      failed_when: false
+
+    - name: Check Keycloak start result
+      ansible.builtin.debug:
+        msg: "Keycloak service start {{ 'successful' if keycloak_start_result.failed == false else 'failed' }}"
+
+    - name: Show systemctl status if start failed
+      ansible.builtin.command: systemctl status keycloak --no-pager -l
+      register: keycloak_status_detail
+      when: keycloak_start_result.failed
+      failed_when: false
+
+    - name: Show detailed status
+      ansible.builtin.debug:
+        msg: "{{ keycloak_status_detail.stdout_lines }}"
+      when: keycloak_start_result.failed
+
+    - name: Wait for Keycloak to start
+      ansible.builtin.wait_for:
+        port: "{{ keycloak_http_port }}"
+        host: localhost
+        delay: 15
+        timeout: 120
+
+    - name: Install Python requests library
+      ansible.builtin.apt:
+        name: python3-requests
+        state: present
+
+    - name: Copy Python script to create realm
+      ansible.builtin.copy:
+        src: ../files/keycloak/create_realm.py
+        dest: "/tmp/create_realm.py"
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Wait for Keycloak to be fully ready
+      ansible.builtin.wait_for:
+        port: "{{ keycloak_http_port }}"
+        host: localhost
+        delay: 10
+        timeout: 60
+
+    - name: Check if Keycloak is listening on port
+      ansible.builtin.wait_for:
+        port: "{{ keycloak_http_port }}"
+        host: localhost
+        delay: 5
+        timeout: 60
+      register: keycloak_port_check
+      failed_when: false
+
+    - name: Show port check result
+      ansible.builtin.debug:
+        msg: "Keycloak port {{ keycloak_http_port }} is {{ 'accessible' if keycloak_port_check.elapsed is defined else 'not accessible' }}"
+
+    - name: Check Keycloak service status
+      ansible.builtin.command: systemctl status keycloak
+      register: keycloak_service_status
+      failed_when: false
+
+    - name: Show Keycloak service status
+      ansible.builtin.debug:
+        msg: "{{ keycloak_service_status.stdout_lines }}"
+
+    - name: Check Keycloak logs
+      ansible.builtin.command: journalctl -u keycloak --no-pager -l --lines=20
+      register: keycloak_logs
+      failed_when: false
+
+    - name: Show recent Keycloak logs
+      ansible.builtin.debug:
+        msg: "{{ keycloak_logs.stdout_lines }}"
+
+    - name: Verify Keycloak is responding (with retries)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/realms/master"
+        method: GET
+        status_code: [200, 302]
+        validate_certs: no
+        timeout: 30
+      register: master_realm_check
+      retries: 3
+      delay: 10
+      until: master_realm_check.status in [200, 302]
+      failed_when: false
+
+    - name: Show Keycloak response check result
+      ansible.builtin.debug:
+        msg: 
+          - "Keycloak Response Check:"
+          - "Status: {{ master_realm_check.status | default('Connection failed') }}"
+          - "URL: http://localhost:{{ keycloak_http_port }}/realms/master"
+          - "Response: {{ master_realm_check.msg | default('N/A') }}"
+
+    - name: Test direct Keycloak connectivity before running script
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/realms/master/.well-known/openid-configuration"
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: keycloak_direct_test
+      retries: 3
+      delay: 5
+      until: keycloak_direct_test.status == 200
+      failed_when: false
+
+    - name: Show direct connectivity test result
+      ansible.builtin.debug:
+        msg: "Direct Keycloak connectivity: {{ 'SUCCESS' if keycloak_direct_test.status == 200 else 'FAILED - Status: ' + (keycloak_direct_test.status | string) }}"
+
+    - name: Execute Python script to create realm and user
+      ansible.builtin.command:
+        cmd: python3 /tmp/create_realm.py
+      register: python_script_result
+      changed_when: "'created successfully' in python_script_result.stdout"
+      when: keycloak_direct_test.status == 200
+      failed_when: 
+        - python_script_result.rc != 0
+        - "'already exists' not in python_script_result.stdout"
+
+    - name: Skip script execution if Keycloak not accessible
+      ansible.builtin.debug:
+        msg: "Skipping Python script execution because Keycloak is not accessible directly"
+      when: keycloak_direct_test.status != 200
+
+    - name: Show Python script output
+      ansible.builtin.debug:
+        msg: "{{ python_script_result.stdout_lines }}"
+      when: python_script_result.stdout_lines is defined
+
+    - name: Verify realm was created successfully
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/realms/durval-crm"
+        method: GET
+        status_code: [200]
+        validate_certs: no
+        follow_redirects: none
+      register: realm_verify
+      failed_when: false
+
+    - name: Show realm verification result
+      ansible.builtin.debug:
+        msg: "Realm 'durval-crm' {{ 'is available and configured' if realm_verify.status == 200 else 'was not found - creation may have failed' }}"
+
+    - name: Get admin access token for client creation
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: admin-cli
+          username: "{{ keycloak_admin_user }}"
+          password: "{{ keycloak_admin_password }}"
+        validate_certs: no
+        follow_redirects: none
+      register: admin_token_response
+      when: realm_verify.status == 200
+      failed_when: false
+
+    - name: Create durvalcrm-app client in realm
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/admin/realms/durval-crm/clients"
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ admin_token_response.json.access_token }}"
+        body_format: json
+        body:
+          clientId: "{{ client_name }}"
+          name: "DurvalCRM Application"
+          description: "Client for DurvalCRM web application"
+          enabled: true
+          publicClient: true
+          standardFlowEnabled: true
+          implicitFlowEnabled: false
+          directAccessGrantsEnabled: true
+          serviceAccountsEnabled: false
+          protocol: "openid-connect"
+          redirectUris: "{{ redirect_uris }}"
+          webOrigins: "{{ web_origins }}"
+          attributes:
+            "pkce.code.challenge.method": "S256"
+        status_code: [201, 409]
+        validate_certs: no
+        follow_redirects: none
+      register: client_creation_result
+      when: 
+        - realm_verify.status == 200
+        - admin_token_response.json.access_token is defined
+      failed_when: false
+
+    - name: Show client creation result (when executed)
+      ansible.builtin.debug:
+        msg: 
+          - "Client creation status: {{ client_creation_result.status }}"
+          - "Client '{{ client_name }}' {{ 'created successfully' if client_creation_result.status == 201 else 'already exists' if client_creation_result.status == 409 else 'creation failed' }}"
+          - "Redirect URIs: {{ redirect_uris | join(', ') }}"
+          - "Web Origins: {{ web_origins | join(', ') }}"
+      when: 
+        - client_creation_result is defined
+        - client_creation_result.status is defined
+
+    - name: Show client creation was skipped
+      ansible.builtin.debug:
+        msg: 
+          - "Client '{{ client_name }}' creation was skipped"
+          - "Reason: Prerequisites not met (realm not accessible or admin token not available)"
+      when: client_creation_result is not defined
+
+    - name: Test user authentication
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/realms/durval-crm/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: admin-cli
+          username: tesouraria
+          password: cairbar@2025
+        validate_certs: no
+        follow_redirects: none
+      register: user_auth_test
+      failed_when: false
+
+    - name: Show user authentication test result
+      ansible.builtin.debug:
+        msg: "User 'tesouraria' {{ 'can authenticate successfully' if user_auth_test.status == 200 else 'authentication failed or user not created' }}"
+
+    - name: Test Keycloak HTTP connectivity from localhost
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}"
+        method: GET
+        status_code: [200, 302]
+        validate_certs: no
+        follow_redirects: none
+      register: keycloak_local_test
+      failed_when: false
+
+    - name: Show local connectivity test result
+      ansible.builtin.debug:
+        msg: "Keycloak HTTP local test - Status: {{ keycloak_local_test.status }}"
+
+    - name: Test Keycloak port accessibility from external
+      ansible.builtin.wait_for:
+        port: "{{ keycloak_http_port }}"
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 2
+        timeout: 10
+        state: started
+      register: keycloak_port_test
+
+    - name: Show external port accessibility test result
+      ansible.builtin.debug:
+        msg: "Keycloak port {{ keycloak_http_port }} is accessible from {{ ansible_default_ipv4.address }}"
+
+    - name: Test Keycloak health endpoint
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/health"
+        method: GET
+        status_code: [200, 404]
+        validate_certs: no
+        follow_redirects: none
+      register: health_test
+      failed_when: false
+
+    - name: Show health check result
+      ansible.builtin.debug:
+        msg: "Keycloak health endpoint: {{ health_test.status }} - {{ health_test.json | default('Health endpoint not available in this version') }}"
+
+    - name: Test Keycloak realms endpoint as alternative health check
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/realms/master/.well-known/openid-configuration"
+        method: GET
+        status_code: 200
+        validate_certs: no
+        follow_redirects: none
+      register: realms_test
+      failed_when: false
+
+    - name: Show alternative health check result
+      ansible.builtin.debug:
+        msg: "Keycloak is {{ 'healthy and operational' if realms_test.status == 200 else 'not fully operational' }}"
+
+    - name: Configure firewall to allow Keycloak HTTP connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: "{{ keycloak_http_port }}"
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Display Keycloak connection information
+      ansible.builtin.debug:
+        msg:
+          - "Keycloak has been successfully installed and configured"
+          - "Version: {{ keycloak_version }}"
+          - "Home Directory: {{ keycloak_home }}"
+          - "HTTP Port: {{ keycloak_http_port }}"
+          - "Admin User: {{ keycloak_admin_user }}"
+          - "Admin Password: {{ keycloak_admin_password }}"
+          - "Database: {{ keycloak_db_name }}"
+          - "DB User: {{ keycloak_db_user }}"
+          - "Admin Console: http://{{ ansible_default_ipv4.address }}:{{ keycloak_http_port }}/admin"
+          - "Account Console: http://{{ ansible_default_ipv4.address }}:{{ keycloak_http_port }}/realms/durval-crm/account"
+          - "Service: systemctl status keycloak"
+
+  handlers:
+    - name: restart keycloak
+      ansible.builtin.systemd:
+        name: keycloak
+        state: restarted

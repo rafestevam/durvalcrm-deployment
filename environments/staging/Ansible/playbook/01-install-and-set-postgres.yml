@@ -1,0 +1,221 @@
+---
+- name: Install and Configure PostgreSQL
+  hosts: vm-staging
+  become: yes
+  vars:
+    postgresql_version: "16"
+    postgresql_data_dir: "/var/lib/postgresql/{{ postgresql_version }}/main"
+    postgresql_config_dir: "/etc/postgresql/{{ postgresql_version }}/main"
+
+  tasks:
+    - name: Copy init.sql file to managed server
+      ansible.builtin.copy:
+        src: ../files/postgres/init.sql
+        dest: /tmp/init.sql
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install PostgreSQL and related packages
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - postgresql-contrib
+          - postgresql-client
+          - python3-psycopg2
+        state: present
+
+    - name: Ensure PostgreSQL is started and enabled
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Get PostgreSQL version
+      ansible.builtin.shell: |
+        ls /etc/postgresql/ | head -n1
+      register: pg_version
+      changed_when: false
+
+    - name: Set PostgreSQL version fact
+      ansible.builtin.set_fact:
+        detected_pg_version: "{{ pg_version.stdout }}"
+
+    - name: Configure PostgreSQL to listen on all interfaces
+      ansible.builtin.lineinfile:
+        path: "/etc/postgresql/{{ detected_pg_version }}/main/postgresql.conf"
+        regexp: "^#?listen_addresses"
+        line: "listen_addresses = '*'"
+        backup: yes
+      notify: restart postgresql
+
+    - name: Configure pg_hba.conf for remote access - IPv4
+      ansible.builtin.lineinfile:
+        path: "/etc/postgresql/{{ detected_pg_version }}/main/pg_hba.conf"
+        line: "host    all             all             0.0.0.0/0               md5"
+        insertafter: "^# IPv4 local connections:"
+        backup: yes
+      notify: restart postgresql
+
+    - name: Configure pg_hba.conf for remote access - IPv6
+      ansible.builtin.lineinfile:
+        path: "/etc/postgresql/{{ detected_pg_version }}/main/pg_hba.conf"
+        line: "host    all             all             ::/0                    md5"
+        insertafter: "^# IPv6 local connections:"
+        backup: yes
+      notify: restart postgresql
+
+    - name: Ensure PostgreSQL is restarted to apply configuration changes
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted
+
+    - name: Wait for PostgreSQL to be ready
+      ansible.builtin.wait_for:
+        port: 5432
+        host: localhost
+        delay: 5
+        timeout: 30
+
+    - name: Set postgres user password
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_user:
+        name: durvalcrm_user
+        password: durvalcrm@2025
+        encrypted: yes
+        state: present
+
+    - name: Create durvalcrm database
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_db:
+        name: durvalcrm
+        encoding: UTF-8
+        lc_collate: en_US.UTF-8
+        lc_ctype: en_US.UTF-8
+        template: template0
+        owner: durvalcrm_user
+        state: present
+
+    - name: Grant database privileges to durvalcrm_user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: durvalcrm
+        roles: durvalcrm_user
+        type: database
+        privs: ALL
+        state: present
+
+    - name: Execute init.sql script to create tables and schema
+      become: yes
+      become_user: postgres
+      ansible.builtin.shell: |
+        psql -d durvalcrm -f /tmp/init.sql
+      register: schema_creation
+      failed_when: false
+
+    - name: Show schema creation result
+      ansible.builtin.debug:
+        msg: "Schema creation output: {{ schema_creation.stdout }}"
+      when: schema_creation.stdout is defined
+
+    - name: Grant all privileges on tables to durvalcrm_user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: durvalcrm
+        roles: durvalcrm_user
+        type: table
+        objs: ALL_IN_SCHEMA
+        schema: public
+        privs: ALL
+        state: present
+
+    - name: Grant all privileges on sequences to durvalcrm_user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: durvalcrm
+        roles: durvalcrm_user
+        type: sequence
+        objs: ALL_IN_SCHEMA
+        schema: public
+        privs: ALL
+        state: present
+
+    - name: Grant usage on schema public to durvalcrm_user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: durvalcrm
+        roles: durvalcrm_user
+        type: schema
+        objs: public
+        privs: ALL
+        state: present
+
+    - name: Set default privileges for future tables
+      become: yes
+      become_user: postgres
+      ansible.builtin.shell: |
+        psql -d durvalcrm -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO durvalcrm_user;"
+        psql -d durvalcrm -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO durvalcrm_user;"
+        psql -d durvalcrm -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO durvalcrm_user;"
+      register: default_privs
+      failed_when: false
+
+    - name: Test PostgreSQL connectivity from localhost
+      ansible.builtin.postgresql_ping:
+        db: durvalcrm
+        login_host: localhost
+        login_user: durvalcrm_user
+        login_password: durvalcrm@2025
+      register: pg_local_test
+
+    - name: Show local connectivity test result
+      ansible.builtin.debug:
+        msg: "PostgreSQL local connectivity test: {{ 'PASSED' if pg_local_test.is_available else 'FAILED' }}"
+
+    - name: Test PostgreSQL port accessibility from external
+      ansible.builtin.wait_for:
+        port: 5432
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 2
+        timeout: 10
+        state: started
+      register: pg_port_test
+
+    - name: Show port accessibility test result
+      ansible.builtin.debug:
+        msg: "PostgreSQL port 5432 is accessible from {{ ansible_default_ipv4.address }}"
+
+    - name: Configure firewall to allow PostgreSQL connections (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: '5432'
+        proto: tcp
+      ignore_errors: yes
+
+    - name: Display PostgreSQL connection information
+      ansible.builtin.debug:
+        msg:
+          - "PostgreSQL has been successfully installed and configured"
+          - "Database: durvalcrm"
+          - "User: postgres"
+          - "Password: postgres"
+          - "Port: 5432"
+          - "Host: {{ ansible_default_ipv4.address }}"
+          - "Connection string: postgresql://postgres:postgres@{{ ansible_default_ipv4.address }}:5432/durvalcrm"
+
+  handlers:
+    - name: restart postgresql
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted

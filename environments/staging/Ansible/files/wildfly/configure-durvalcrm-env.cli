@@ -1,0 +1,18 @@
+# DurvalCRM Environment Configuration CLI Script for WildFly
+# Este script configura as variáveis de ambiente do Keycloak no WildFly
+# Execute com: $JBOSS_HOME/bin/jboss-cli.sh --file=configure-durvalcrm-env.cli
+
+# Conectar ao servidor local
+connect
+
+# Verificar se o subsystem naming existe
+/subsystem=naming:read-resource
+
+# Configurar variáveis de ambiente para Development
+/subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/public-url:add(binding-type=simple, type=java.lang.String, value="http://localhost:9080")
+/subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/internal-url:add(binding-type=simple, type=java.lang.String, value="http://localhost:8090")
+/subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/client-id:add(binding-type=simple, type=java.lang.String, value="durvalcrm-app")
+/subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/realm:add(binding-type=simple, type=java.lang.String, value="durval-crm")
+
+# Desconectar (sem reload para evitar problemas de conexão)
+quit

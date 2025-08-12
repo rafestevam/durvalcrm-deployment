@@ -1,0 +1,450 @@
+# Nginx Development Configuration for DurvalCRM
+# HTTPS proxy configuration for staging environment
+
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log debug;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log  /var/log/nginx/access.log  main;
+
+    sendfile            on;
+    tcp_nopush          on;
+    tcp_nodelay         on;
+    keepalive_timeout   65;
+    types_hash_max_size 4096;
+
+    include             /etc/nginx/mime.types;
+    default_type        application/octet-stream;
+
+    # Upstream servers - using HTTPS backends
+    upstream wildfly_secure {
+        server 127.0.0.1:8443;
+    }
+
+    upstream keycloak_secure {
+        server 127.0.0.1:8543;
+    }
+
+    # Fallback HTTP upstreams (in case HTTPS is not available)
+    upstream wildfly_dev {
+        server 127.0.0.1:8080;
+    }
+
+    upstream keycloak_dev {
+        server 127.0.0.1:8090;
+    }
+
+    upstream vite_dev {
+        server 127.0.0.1:5173;
+    }
+
+    # HTTPS Server Configuration - Port 9443
+    server {
+        listen 9443 ssl http2;
+        server_name localhost 127.0.0.1;
+
+        # SSL Certificate Configuration
+        ssl_certificate /home/vagrant/certificates/server.crt;
+        ssl_certificate_key /home/vagrant/certificates/server.key;
+        
+        # SSL Security Configuration
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+        
+        # SSL additional security headers
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+
+        # Favicon handler
+        location = /favicon.ico {
+            proxy_pass https://wildfly_secure/durvalcrm-frontend/favicon.ico;
+            proxy_ssl_verify off;
+            access_log off;
+            expires 30d;
+        }
+
+        # CRM favicon handler
+        location = /crm/favicon.ico {
+            proxy_pass https://wildfly_secure/durvalcrm-frontend/favicon.ico;
+            proxy_ssl_verify off;
+            access_log off;
+            expires 30d;
+        }
+
+        # CRM Assets - Static files (JS, CSS) - Higher priority with regex
+        location ~ ^/crm/assets/(.*)$ {
+            proxy_pass https://wildfly_secure/durvalcrm-frontend/assets/$1;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # Cache static assets
+            expires 1d;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # CRM Images - Higher priority with regex
+        location ~ ^/crm/img/(.*)$ {
+            proxy_pass https://wildfly_secure/durvalcrm-frontend/img/$1;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # Cache images
+            expires 7d;
+            add_header Cache-Control "public";
+        }
+
+        # CRM Fonts - Higher priority with regex
+        location ~ ^/crm/fonts/(.*)$ {
+            proxy_pass https://wildfly_secure/durvalcrm-frontend/fonts/$1;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # Cache fonts
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+
+        # CRM root redirect
+        location = /crm {
+            return 301 https://$host:9443$request_uri/;
+        }
+
+        # CRM Application - Proxy to WildFly HTTPS
+        location /crm/ {
+            # Proxy to WildFly HTTPS, remove /crm and add /durvalcrm-frontend
+            proxy_pass https://wildfly_secure/durvalcrm-frontend/;
+            proxy_ssl_verify off;
+            
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Prefix /crm;
+            
+            # WebSocket support
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # Timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+            
+            # Buffer settings
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_busy_buffers_size 256k;
+        }
+
+        # Keycloak static resources (images, CSS, JS, maps) - handle before /admin
+        location ~* ^/(resources)/.*\.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|map)$ {
+            proxy_pass https://keycloak_secure;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # Cache static resources
+            expires 1d;
+            add_header Cache-Control "public, immutable";
+        }
+        
+        # Keycloak resources without /admin prefix (for direct resource access)
+        location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            proxy_pass http://keycloak_dev;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # Cache static resources
+            expires 1d;
+            add_header Cache-Control "public, immutable";
+            access_log off;
+        }
+
+        # Admin Console - Simple proxy to Keycloak
+        location /admin/ {
+            proxy_pass http://keycloak_dev/admin/;
+            
+            # Standard proxy headers
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host:$server_port;
+            
+            # WebSocket support
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # Buffer settings
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_busy_buffers_size 256k;
+            
+            # Let NGINX handle redirects
+            proxy_redirect http://127.0.0.1:8090/ https://$host:$server_port/;
+            proxy_redirect http://localhost:8090/ https://$host:$server_port/;
+        }
+
+        # Handle /admin without trailing slash
+        location = /admin {
+            return 301 /admin/;
+        }
+
+        # DurvalCRM API - proxy to WildFly HTTPS (map /api/ to /durvalcrm/api/)
+        location /api/ {
+            proxy_pass https://wildfly_secure/durvalcrm/api/;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # Handle CORS for development
+            add_header 'Access-Control-Allow-Origin' 'https://localhost:9443' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+            add_header 'Access-Control-Expose-Headers' 'Content-Length,Content-Range' always;
+            
+            if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' 'https://localhost:9443';
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization';
+                add_header 'Access-Control-Max-Age' 1728000;
+                add_header 'Content-Type' 'text/plain; charset=utf-8';
+                add_header 'Content-Length' 0;
+                return 204;
+            }
+        }
+
+        # WildFly Management Console - Proxy to WildFly Management HTTPS
+        location /wildfly/ {
+            proxy_pass https://127.0.0.1:9993/;
+            proxy_ssl_verify off;
+            
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Prefix /wildfly;
+            
+            # WebSocket support for management interface
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # Timeouts for management interface
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+            
+            # Buffer settings
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_busy_buffers_size 256k;
+            
+            # Handle CORS for management console
+            add_header 'Access-Control-Allow-Origin' 'https://localhost:9443' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+        }
+
+        
+        # Keycloak Realms - Direct access to realm endpoints
+        location /realms/ {
+            proxy_pass http://keycloak_dev/realms/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host:$server_port;
+            
+            # Handle large headers from Keycloak
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_busy_buffers_size 256k;
+            
+            # Handle redirects
+            proxy_redirect http://127.0.0.1:8090/ https://$host:$server_port/;
+            proxy_redirect http://localhost:8090/ https://$host:$server_port/;
+            
+            # CORS headers for API access
+            add_header 'Access-Control-Allow-Origin' 'https://localhost:9443' always;
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS' always;
+            add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+        }
+
+        # Keycloak Auth (legacy path for compatibility with older versions)
+        location /auth/ {
+            proxy_pass http://keycloak_dev/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host:$server_port;
+            
+            # Handle large headers from Keycloak
+            proxy_buffer_size 128k;
+            proxy_buffers 4 256k;
+            proxy_busy_buffers_size 256k;
+            
+            # Handle redirects
+            proxy_redirect http://127.0.0.1:8090/ https://$host:$server_port/;
+            proxy_redirect http://localhost:8090/ https://$host:$server_port/;
+        }
+
+        # Development Frontend (Vite dev server) - fallback for root access
+        location / {
+            proxy_pass http://vite_dev;  # Vite dev server
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            
+            # WebSocket support for Vite HMR
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+        }
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Error pages
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+            root   /usr/share/nginx/html;
+        }
+    }
+
+    # HTTP Server - Port 9080 - Redirect to HTTPS
+    server {
+        listen 9080;
+        server_name localhost 127.0.0.1;
+
+        # Health check endpoint (allow HTTP for monitoring)
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Redirect all other traffic to HTTPS
+        location / {
+            return 301 https://$host:9443$request_uri;
+        }
+    }
+
+    # Additional server to handle localhost:80 requests - redirect to HTTPS
+    server {
+        listen 80;
+        server_name localhost 127.0.0.1;
+
+        # Redirect all requests to HTTPS port
+        location / {
+            return 301 https://$host:9443$request_uri;
+        }
+    }
+
+    # HTTP Server - Port 8080 - Redirect specific paths to HTTPS 9443
+    server {
+        listen 8080;
+        server_name localhost 127.0.0.1;
+
+        # Health check endpoint (allow HTTP for monitoring)
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Redirect /durvalcrm-frontend to https://localhost:9443/crm
+        location /durvalcrm-frontend {
+            return 301 https://localhost:9443/crm;
+        }
+
+        # Redirect /durvalcrm-frontend/ to https://localhost:9443/crm/
+        location /durvalcrm-frontend/ {
+            return 301 https://localhost:9443/crm/;
+        }
+
+        # Redirect /durvalcrm/api to https://localhost:9443/api
+        location /durvalcrm/api {
+            return 301 https://localhost:9443/api/;
+        }
+
+        # Redirect all other traffic to HTTPS
+        location / {
+            return 301 https://$host:9443$request_uri;
+        }
+    }
+
+    # HTTP Server - Port 8090 - Redirect to https://localhost:9443/admin
+    server {
+        listen 8090;
+        server_name localhost 127.0.0.1;
+
+        # Health check endpoint (allow HTTP for monitoring)
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Redirect all requests to HTTPS admin interface
+        location / {
+            return 301 https://localhost:9443/admin;
+        }
+    }
+
+    # HTTP Server - Port 9990 - Redirect to https://localhost:9443/wildfly
+    server {
+        listen 9990;
+        server_name localhost 127.0.0.1;
+
+        # Health check endpoint (allow HTTP for monitoring)
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Redirect all requests to HTTPS wildfly management
+        location / {
+            return 301 https://localhost:9443/wildfly;
+        }
+    }
+}

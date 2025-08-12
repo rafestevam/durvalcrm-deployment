@@ -1,0 +1,198 @@
+---
+- name: Set Security and Create Self-Signed Certificate
+  hosts: vm-staging
+  become: yes
+  vars:
+    cert_common_name: "{{ ansible_fqdn | default(ansible_hostname) }}"
+    cert_country: "BR"
+    cert_state: "Sao Paulo"
+    cert_locality: "Sao Paulo"
+    cert_organization: "DurvalCRM"
+    cert_organizational_unit: "IT Department"
+    cert_validity_days: 365
+    cert_key_size: 4096
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install OpenSSL and certificate management tools
+      ansible.builtin.apt:
+        name:
+          - openssl
+          - ca-certificates
+          - ssl-cert
+          - python3-cryptography
+        state: present
+
+    - name: Create certificate directory in ansible_user home
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/certificates"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Generate private key for self-signed certificate
+      community.crypto.openssl_privatekey:
+        path: "/home/{{ ansible_user }}/certificates/server.key"
+        size: "{{ cert_key_size }}"
+        type: RSA
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Generate Certificate Signing Request (CSR)
+      community.crypto.openssl_csr:
+        path: "/home/{{ ansible_user }}/certificates/server.csr"
+        privatekey_path: "/home/{{ ansible_user }}/certificates/server.key"
+        common_name: "{{ cert_common_name }}"
+        country_name: "{{ cert_country }}"
+        state_or_province_name: "{{ cert_state }}"
+        locality_name: "{{ cert_locality }}"
+        organization_name: "{{ cert_organization }}"
+        organizational_unit_name: "{{ cert_organizational_unit }}"
+        subject_alt_name:
+          - "DNS:{{ ansible_hostname }}"
+          - "DNS:{{ ansible_fqdn | default(ansible_hostname) }}"
+          - "DNS:localhost"
+          - "IP:{{ ansible_default_ipv4.address }}"
+          - "IP:127.0.0.1"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Generate self-signed certificate
+      community.crypto.x509_certificate:
+        path: "/home/{{ ansible_user }}/certificates/server.crt"
+        csr_path: "/home/{{ ansible_user }}/certificates/server.csr"
+        privatekey_path: "/home/{{ ansible_user }}/certificates/server.key"
+        provider: selfsigned
+        selfsigned_not_after: "+{{ cert_validity_days }}d"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Generate PEM bundle (certificate + key)
+      ansible.builtin.shell: |
+        cat /home/{{ ansible_user }}/certificates/server.crt \
+            /home/{{ ansible_user }}/certificates/server.key \
+            > /home/{{ ansible_user }}/certificates/server.pem
+      args:
+        creates: "/home/{{ ansible_user }}/certificates/server.pem"
+
+    - name: Set proper permissions for PEM bundle
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/certificates/server.pem"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Generate DH parameters for enhanced security (this may take a while)
+      community.crypto.openssl_dhparam:
+        path: "/home/{{ ansible_user }}/certificates/dhparam.pem"
+        size: 2048
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Create PKCS12 keystore for Java applications (optional)
+      community.crypto.openssl_pkcs12:
+        action: export
+        path: "/home/{{ ansible_user }}/certificates/keystore.p12"
+        certificate_path: "/home/{{ ansible_user }}/certificates/server.crt"
+        privatekey_path: "/home/{{ ansible_user }}/certificates/server.key"
+        passphrase: "changeit"
+        friendly_name: "durvalcrm-cert"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Generate certificate information file
+      ansible.builtin.copy:
+        content: |
+          Certificate Information
+          =======================
+          Generated: {{ ansible_date_time.iso8601 }}
+          Host: {{ ansible_hostname }}
+          IP Address: {{ ansible_default_ipv4.address }}
+          Common Name: {{ cert_common_name }}
+          Validity: {{ cert_validity_days }} days
+          
+          Files Generated:
+          - server.key: Private key (RSA {{ cert_key_size }} bits)
+          - server.csr: Certificate Signing Request
+          - server.crt: Self-signed certificate
+          - server.pem: Combined certificate and key (for Nginx, HAProxy, etc.)
+          - dhparam.pem: Diffie-Hellman parameters
+          - keystore.p12: PKCS12 keystore for Java applications (password: changeit)
+          
+          Certificate Details:
+          --------------------
+          Country: {{ cert_country }}
+          State: {{ cert_state }}
+          Locality: {{ cert_locality }}
+          Organization: {{ cert_organization }}
+          Organizational Unit: {{ cert_organizational_unit }}
+          
+          Subject Alternative Names:
+          - DNS:{{ ansible_hostname }}
+          - DNS:{{ ansible_fqdn | default(ansible_hostname) }}
+          - DNS:localhost
+          - IP:{{ ansible_default_ipv4.address }}
+          - IP:127.0.0.1
+          
+          Usage Examples:
+          ---------------
+          Nginx:
+            ssl_certificate /home/{{ ansible_user }}/certificates/server.crt;
+            ssl_certificate_key /home/{{ ansible_user }}/certificates/server.key;
+            ssl_dhparam /home/{{ ansible_user }}/certificates/dhparam.pem;
+          
+          Apache:
+            SSLCertificateFile /home/{{ ansible_user }}/certificates/server.crt
+            SSLCertificateKeyFile /home/{{ ansible_user }}/certificates/server.key
+          
+          Java/Keycloak/WildFly:
+            Use keystore.p12 with password: changeit
+        dest: "/home/{{ ansible_user }}/certificates/README.txt"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Display certificate information
+      ansible.builtin.debug:
+        msg:
+          - "Self-signed certificate has been successfully created"
+          - "Certificate location: /home/{{ ansible_user }}/certificates/"
+          - "Certificate files:"
+          - "  - server.crt: Certificate file"
+          - "  - server.key: Private key file"
+          - "  - server.pem: Combined certificate and key"
+          - "  - dhparam.pem: DH parameters"
+          - "  - keystore.p12: Java keystore (password: changeit)"
+          - "Certificate is valid for {{ cert_validity_days }} days"
+          - "Certificate CN: {{ cert_common_name }}"
+
+    - name: Verify certificate validity
+      ansible.builtin.shell: |
+        openssl x509 -in /home/{{ ansible_user }}/certificates/server.crt -noout -dates
+      register: cert_dates
+      changed_when: false
+
+    - name: Show certificate validity dates
+      ansible.builtin.debug:
+        msg: "{{ cert_dates.stdout_lines }}"
+
+    - name: Test certificate chain
+      ansible.builtin.shell: |
+        openssl verify -CAfile /home/{{ ansible_user }}/certificates/server.crt /home/{{ ansible_user }}/certificates/server.crt
+      register: cert_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Show certificate verification result
+      ansible.builtin.debug:
+        msg: "Certificate verification: {{ cert_verify.stdout }}"
