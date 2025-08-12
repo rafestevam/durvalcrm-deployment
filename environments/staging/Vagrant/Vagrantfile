@@ -28,17 +28,17 @@ Vagrant.configure("2") do |config|
   config.vm.network "forwarded_port", guest: 9443, host: 9443, host_ip: "127.0.0.1" # Nginx HTTPS
   
   # WildFly ports for direct access and debugging
-  config.vm.network "forwarded_port", guest: 8080, host: 8080, host_ip: "127.0.0.1"  # WildFly HTTPS
-  config.vm.network "forwarded_port", guest: 9990, host: 9990, host_ip: "127.0.0.1"  # WildFly Admin HTTPS
+  #config.vm.network "forwarded_port", guest: 8080, host: 8080, host_ip: "127.0.0.1"  # WildFly HTTPS
+  #config.vm.network "forwarded_port", guest: 9990, host: 9990, host_ip: "127.0.0.1"  # WildFly Admin HTTPS
   
   # Keycloak ports for direct access
-  config.vm.network "forwarded_port", guest: 8090, host: 8090, host_ip: "127.0.0.1"  # Keycloak HTTPS
+  #config.vm.network "forwarded_port", guest: 8090, host: 8090, host_ip: "127.0.0.1"  # Keycloak HTTPS
   
   # PostgreSQL for database management tools
-  config.vm.network "forwarded_port", guest: 5432, host: 5432, host_ip: "127.0.0.1"  # PostgreSQL
+  #config.vm.network "forwarded_port", guest: 5432, host: 5432, host_ip: "127.0.0.1"  # PostgreSQL
   
   # Vite dev server (if running on VM)
-  config.vm.network "forwarded_port", guest: 5173, host: 5173, host_ip: "127.0.0.1"  # Vite dev server
+  #config.vm.network "forwarded_port", guest: 5173, host: 5173, host_ip: "127.0.0.1"  # Vite dev server
 
   # Create a private network, which allows host-only access to the machine
   # using a specific IP.
@@ -100,16 +100,10 @@ Vagrant.configure("2") do |config|
     echo "DurvalCRM Staging Environment Ready"
     echo "=========================================="
     echo "Access URLs (from host machine):"
-    echo "  Main Application: https://localhost:9443/crm"
-    echo "  Admin Console:    https://localhost:9443/admin"
-    echo "  Health Check:     https://localhost:9443/health"
-    echo ""
-    echo "Direct Service Access:"
-    echo "  WildFly HTTPS:     https://localhost:8443"
-    echo "  WildFly Admin:     https://localhost:9993"
-    echo "  Keycloak HTTPS:    https://localhost:8543"
-    echo "  PostgreSQL:       localhost:5432"
-    echo "  Vite Dev Server:  http://localhost:5173"
+    echo "  Main Application:          https://localhost:9443/crm"
+    echo "  Keycloak Admin Console:    https://localhost:9443/admin"
+    echo "  Health Check:              https://localhost:9443/health"
+    echo "  Wildfly Admin Console:     https://localhost:9443/wildfly"
     echo "=========================================="
     echo ""
   SHELL

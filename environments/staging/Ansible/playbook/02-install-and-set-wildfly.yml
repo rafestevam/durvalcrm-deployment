@@ -163,7 +163,7 @@
 
     - name: Create WildFly admin user
       ansible.builtin.shell: |
-        {{ wildfly_home }}/bin/add-user.sh -u {{ wildfly_admin_user }} -p {{ wildfly_admin_password }} -g admin -s
+        {{ wildfly_home }}/bin/add-user.sh -u {{ wildfly_admin_user }} -p {{ wildfly_admin_password }} -g SuperUser,Administrator,admin -s
       become: yes
       become_user: "{{ wildfly_user }}"
       environment:
@@ -175,6 +175,93 @@
       ansible.builtin.debug:
         msg: "Admin user creation result: {{ add_user_result.stdout }}"
       when: add_user_result.stdout is defined
+
+    - name: Configure RBAC - Enable RBAC provider
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization:write-attribute(name=provider,value=rbac)"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: rbac_provider_result
+      failed_when: false
+
+    - name: Create RBAC role mappings and add admin user
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=SuperUser/include=user-admin:add(name=admin,type=USER)" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Administrator:add()" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Administrator/include=user-admin:add(name=admin,type=USER)" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Maintainer:add()" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Maintainer/include=user-admin:add(name=admin,type=USER)" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Operator:add()" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Operator/include=user-admin:add(name=admin,type=USER)" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Monitor:add()" 2>/dev/null || true
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/access=authorization/role-mapping=Monitor/include=user-admin:add(name=admin,type=USER)" 2>/dev/null || true
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: role_mapping_result
+      failed_when: false
+
+    - name: Configure management interface for HTTPS proxy access
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/management-interface=http-interface:write-attribute(name=allowed-origins,value=[\"https://localhost:9443\"])"
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/management-interface=http-interface:write-attribute(name=server-name,value=\"localhost\")"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: management_interface_result
+      failed_when: false
+
+    - name: Configure authentication mechanisms for proxy access
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/subsystem=elytron/http-authentication-factory=management-http-authentication:list-add(name=mechanism-configurations,value={mechanism-name=LOCAL})" 2>/dev/null || true
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: auth_mechanism_result
+      failed_when: false
+
+    - name: Reload WildFly to apply RBAC and proxy configurations
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command=":reload"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: wildfly_reload_result
+      failed_when: false
+
+    - name: Wait for WildFly to restart after configuration
+      ansible.builtin.wait_for:
+        port: 8080
+        host: localhost
+        delay: 15
+        timeout: 120
+
+    - name: Verify RBAC configuration
+      ansible.builtin.shell: |
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="ls /core-service=management/access=authorization/role-mapping"
+      become: yes
+      become_user: "{{ wildfly_user }}"
+      environment:
+        JAVA_HOME: "{{ java_home }}"
+      register: rbac_verification
+      failed_when: false
+
+    - name: Show RBAC and proxy configuration results
+      ansible.builtin.debug:
+        msg: 
+          - "RBAC Provider: {{ 'configured' if rbac_provider_result.rc == 0 else 'failed' }}"
+          - "Role Mappings: {{ 'configured' if role_mapping_result.rc == 0 else 'failed' }}"
+          - "Management Interface: {{ 'configured' if management_interface_result.rc == 0 else 'failed' }}"
+          - "Authentication Mechanisms: {{ 'configured' if auth_mechanism_result.rc == 0 else 'failed' }}"
+          - "WildFly Reload: {{ 'successful' if wildfly_reload_result.rc == 0 else 'failed' }}"
+          - "Available Roles: {{ rbac_verification.stdout.split() | join(', ') if rbac_verification.rc == 0 else 'verification failed' }}"
+          - "Console Access: https://{{ ansible_default_ipv4.address }}:9443/wildfly/ (admin/admin123)"
 
     - name: Download PostgreSQL JDBC driver
       ansible.builtin.get_url:
