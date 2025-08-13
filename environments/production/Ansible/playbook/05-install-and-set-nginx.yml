@@ -81,6 +81,7 @@
         mode: '0644'
         remote_src: yes
         backup: yes
+      notify: reload nginx
 
     - name: Verify Let's Encrypt certificates exist
       ansible.builtin.stat:

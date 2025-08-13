@@ -9,7 +9,7 @@ connect
 /subsystem=naming:read-resource
 
 # Configurar variáveis de ambiente para Development
-/subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/public-url:add(binding-type=simple, type=java.lang.String, value="https://localhost:9443/admin")
+/subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/public-url:add(binding-type=simple, type=java.lang.String, value="https://admin.durvalcrm.org")
 /subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/internal-url:add(binding-type=simple, type=java.lang.String, value="http://localhost:8090")
 /subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/client-id:add(binding-type=simple, type=java.lang.String, value="durvalcrm-app")
 /subsystem=naming/binding=java\:global\/durvalcrm\/keycloak\/realm:add(binding-type=simple, type=java.lang.String, value="durval-crm")

@@ -1,0 +1,98 @@
+---
+- name: Fix Keycloak Issuer URL Configuration
+  hosts: vm-production
+  become: yes
+  vars:
+    keycloak_home: "/opt/keycloak"
+    keycloak_admin_user: "admin"
+    keycloak_admin_password: "admin123"
+    realm_name: "durval-crm"
+
+  tasks:
+    - name: Copy Keycloak issuer fix script
+      ansible.builtin.copy:
+        src: ../files/keycloak/fix-issuer-url.sh
+        dest: /tmp/fix-issuer-url.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Check Keycloak service status
+      ansible.builtin.systemd:
+        name: keycloak
+      register: keycloak_status
+
+    - name: Display Keycloak service status
+      ansible.builtin.debug:
+        msg: "Keycloak service is {{ keycloak_status.status.ActiveState }}"
+
+    - name: Wait for Keycloak to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:8090/realms/{{ realm_name }}"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: keycloak_health
+      retries: 6
+      delay: 10
+      until: keycloak_health.status == 200
+
+    - name: Execute Keycloak issuer fix script
+      ansible.builtin.shell: |
+        cd /tmp
+        chmod +x fix-issuer-url.sh
+        ./fix-issuer-url.sh
+      register: fix_result
+      environment:
+        KEYCLOAK_HOME: "{{ keycloak_home }}"
+
+    - name: Display fix script output
+      ansible.builtin.debug:
+        msg: "{{ fix_result.stdout_lines }}"
+
+    - name: Display any errors from fix script
+      ansible.builtin.debug:
+        msg: "Errors: {{ fix_result.stderr_lines }}"
+      when: fix_result.stderr_lines | length > 0
+
+    - name: Wait for Keycloak to restart
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Test Keycloak realm after fix
+      ansible.builtin.uri:
+        url: "https://admin.durvalcrm.org/realms/{{ realm_name }}"
+        method: GET
+        validate_certs: no
+        status_code: 200
+        timeout: 15
+      register: realm_test
+
+    - name: Test OpenID configuration
+      ansible.builtin.uri:
+        url: "https://admin.durvalcrm.org/realms/{{ realm_name }}/.well-known/openid_configuration"
+        method: GET
+        validate_certs: no
+        status_code: 200
+        timeout: 15
+      register: openid_config
+
+    - name: Extract issuer from OpenID configuration
+      ansible.builtin.set_fact:
+        issuer_url: "{{ (openid_config.content | from_json).issuer }}"
+
+    - name: Display issuer URL
+      ansible.builtin.debug:
+        msg: "Current issuer URL: {{ issuer_url }}"
+
+    - name: Verify issuer uses HTTPS
+      ansible.builtin.fail:
+        msg: "ERROR: Issuer URL is still using HTTP instead of HTTPS!"
+      when: not issuer_url.startswith('https://')
+
+    - name: Success message
+      ansible.builtin.debug:
+        msg: 
+          - "✅ Keycloak issuer URL has been successfully fixed!"
+          - "✅ Issuer URL: {{ issuer_url }}"
+          - "✅ The authentication flow should now work correctly."

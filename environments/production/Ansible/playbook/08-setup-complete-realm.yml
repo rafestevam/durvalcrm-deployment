@@ -1,0 +1,129 @@
+---
+- name: Setup Complete Keycloak Realm Configuration
+  hosts: vm-production
+  become: yes
+  vars:
+    keycloak_home: "/opt/keycloak"
+    python_script: "setup-realm-complete.py"
+
+  tasks:
+    - name: Copy complete realm setup script
+      ansible.builtin.copy:
+        src: ../files/keycloak/{{ python_script }}
+        dest: /tmp/{{ python_script }}
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install required Python packages
+      ansible.builtin.apt:
+        name:
+          - python3-pip
+          - python3-requests
+        state: present
+        update_cache: yes
+
+    - name: Start Keycloak service
+      ansible.builtin.systemd:
+        name: keycloak
+        state: started
+        enabled: yes
+      register: keycloak_start
+
+    - name: Wait for Keycloak to be fully ready
+      ansible.builtin.uri:
+        url: "http://localhost:8090/realms/master"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: keycloak_health
+      retries: 30
+      delay: 10
+      until: keycloak_health.status == 200
+
+    - name: Execute complete realm setup script
+      ansible.builtin.command:
+        cmd: python3 /tmp/{{ python_script }}
+      register: setup_result
+      failed_when: setup_result.rc != 0
+
+    - name: Display setup script output
+      ansible.builtin.debug:
+        msg: "{{ setup_result.stdout_lines }}"
+
+    - name: Display any errors from setup
+      ansible.builtin.debug:
+        msg: "Errors: {{ setup_result.stderr_lines }}"
+      when: setup_result.stderr_lines | length > 0
+
+    - name: Wait for configuration to take effect
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Test realm configuration
+      ansible.builtin.uri:
+        url: "http://localhost:8090/realms/durval-crm"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: realm_test
+
+    - name: Test realm through nginx proxy
+      ansible.builtin.uri:
+        url: "https://admin.durvalcrm.org/realms/durval-crm"
+        method: GET
+        validate_certs: no
+        status_code: 200
+        timeout: 15
+      register: realm_proxy_test
+
+    - name: Test OpenID configuration through proxy
+      ansible.builtin.uri:
+        url: "https://admin.durvalcrm.org/realms/durval-crm/.well-known/openid_configuration"
+        method: GET
+        validate_certs: no
+        status_code: 200
+        timeout: 15
+      register: openid_test
+
+    - name: Extract issuer from OpenID configuration
+      ansible.builtin.set_fact:
+        issuer_url: "{{ (openid_test.content | from_json).issuer }}"
+
+    - name: Verify issuer URL uses HTTPS
+      ansible.builtin.debug:
+        msg: "✅ Issuer URL: {{ issuer_url }}"
+      when: issuer_url.startswith('https://')
+
+    - name: Fail if issuer still uses HTTP
+      ansible.builtin.fail:
+        msg: "❌ ERROR: Issuer URL is still using HTTP: {{ issuer_url }}"
+      when: not issuer_url.startswith('https://')
+
+    - name: Test API endpoint through nginx
+      ansible.builtin.uri:
+        url: "https://crm.durvalcrm.org/api/auth/login-info"
+        method: GET
+        validate_certs: no
+        status_code: 200
+        timeout: 15
+      register: api_test
+
+    - name: Display API response
+      ansible.builtin.debug:
+        msg: "{{ api_test.json }}"
+
+    - name: Final success message
+      ansible.builtin.debug:
+        msg:
+          - "🎉 Keycloak realm setup completed successfully!"
+          - "📋 Configuration Summary:"
+          - "   ✅ Realm: durval-crm"
+          - "   ✅ Client: durvalcrm-app (with PKCE)"
+          - "   ✅ User: tesouraria / cairbar@2025"
+          - "   ✅ Issuer URL: {{ issuer_url }}"
+          - "   ✅ Redirect URIs configured for:"
+          - "      - https://crm.durvalcrm.org/auth/callback"
+          - "      - https://crm.durvalcrm.org/crm/auth/callback"
+          - ""
+          - "🧪 Ready for login testing!"

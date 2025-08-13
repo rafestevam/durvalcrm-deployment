@@ -30,7 +30,7 @@
 
     - name: Copy DurvalCRM custom theme to Keycloak
       copy:
-        src: ../../../../../durvalcrm-keycloak-theme/durvalcrm/
+        src: /Users/rafaeldeoliveira/projects/DurvalCRM/durvalcrm-keycloak-theme/durvalcrm/
         dest: /opt/keycloak/themes/durvalcrm/
         owner: keycloak
         group: keycloak
