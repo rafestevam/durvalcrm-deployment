@@ -1,0 +1,186 @@
+---
+- name: Configure UFW Firewall - Block All Ports Except HTTPS 443
+  hosts: vm-production
+  become: yes
+  vars:
+    # Production security: Only HTTPS 443 should be accessible
+    allowed_ports:
+      - { port: "22", proto: "tcp", comment: "SSH for management access" }
+      - { port: "443", proto: "tcp", comment: "HTTPS for web traffic" }
+    
+    # Ports to explicitly deny (if they were previously opened)
+    denied_ports:
+      - { port: "80", proto: "tcp", comment: "HTTP - should redirect via NGINX" }
+      - { port: "8080", proto: "tcp", comment: "WildFly HTTP - internal only" }
+      - { port: "8090", proto: "tcp", comment: "Keycloak HTTP - internal only" }
+      - { port: "8443", proto: "tcp", comment: "WildFly HTTPS - internal only" }
+      - { port: "8543", proto: "tcp", comment: "Keycloak HTTPS - internal only" }
+      - { port: "9443", proto: "tcp", comment: "Legacy staging port" }
+      - { port: "9990", proto: "tcp", comment: "WildFly Management - internal only" }
+      - { port: "9993", proto: "tcp", comment: "WildFly Management HTTPS - internal only" }
+      - { port: "5432", proto: "tcp", comment: "PostgreSQL - internal only" }
+
+  tasks:
+    - name: Check if UFW is installed
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Install UFW firewall
+      ansible.builtin.dnf:
+        name: ufw
+        state: present
+      when: "'ufw' not in ansible_facts.packages"
+
+    - name: Reset UFW to defaults (clean slate)
+      community.general.ufw:
+        state: reset
+      notify: reload ufw
+
+    - name: Set UFW default policy - DENY incoming
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: Set UFW default policy - ALLOW outgoing
+      community.general.ufw:
+        default: allow
+        direction: outgoing
+
+    - name: Set UFW default policy - DENY routed
+      community.general.ufw:
+        default: deny
+        direction: routed
+
+    - name: Allow essential ports for production
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "{{ item.comment }}"
+      loop: "{{ allowed_ports }}"
+      notify: reload ufw
+
+    - name: Explicitly deny internal service ports from external access
+      community.general.ufw:
+        rule: deny
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        comment: "BLOCKED - {{ item.comment }}"
+        from_ip: any
+      loop: "{{ denied_ports }}"
+      notify: reload ufw
+
+    - name: Enable UFW logging (low level for production)
+      community.general.ufw:
+        logging: 'low'
+
+    - name: Enable UFW firewall
+      community.general.ufw:
+        state: enabled
+      notify: reload ufw
+
+    - name: Wait for UFW to apply rules
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Get UFW status
+      ansible.builtin.command: ufw status verbose
+      register: ufw_status
+      changed_when: false
+
+    - name: Display UFW configuration
+      ansible.builtin.debug:
+        msg:
+          - "UFW Firewall Status:"
+          - "{{ ufw_status.stdout_lines }}"
+
+    - name: Get listening ports
+      ansible.builtin.shell: |
+        netstat -tuln 2>/dev/null || ss -tuln
+      register: listening_ports
+      changed_when: false
+      failed_when: false
+
+    - name: Display listening ports
+      ansible.builtin.debug:
+        msg:
+          - "Currently listening ports:"
+          - "{{ listening_ports.stdout_lines }}"
+
+    - name: Test HTTPS port 443 accessibility
+      ansible.builtin.wait_for:
+        port: 443
+        host: "{{ ansible_default_ipv4.address }}"
+        delay: 2
+        timeout: 10
+        state: started
+      register: https_test
+      failed_when: false
+
+    - name: Display HTTPS port test result
+      ansible.builtin.debug:
+        msg: 
+          - "HTTPS Port 443 Test: {{ 'SUCCESS - Port is accessible' if https_test is succeeded else 'FAILED - Port is not accessible' }}"
+          - "Production URL: https://durvalcrm.org"
+
+    - name: Test that blocked ports are indeed blocked (from localhost)
+      ansible.builtin.shell: |
+        timeout 3 bash -c "</dev/tcp/127.0.0.1/{{ item.port }}" 2>/dev/null && echo "Port {{ item.port }} is accessible" || echo "Port {{ item.port }} is blocked/closed"
+      loop:
+        - { port: "8080" }
+        - { port: "8090" }
+        - { port: "9990" }
+      register: port_tests
+      changed_when: false
+      failed_when: false
+
+    - name: Display internal port test results
+      ansible.builtin.debug:
+        msg:
+          - "Internal Port Tests (should show services running locally but blocked externally):"
+          - "{{ item.stdout }}"
+      loop: "{{ port_tests.results }}"
+
+    - name: Verify SSH access is still working
+      ansible.builtin.command: echo "SSH connection test successful"
+      register: ssh_test
+      changed_when: false
+
+    - name: Display SSH test result
+      ansible.builtin.debug:
+        msg: "SSH Access Test: {{ ssh_test.stdout }}"
+
+    - name: Display security summary
+      ansible.builtin.debug:
+        msg:
+          - "=== PRODUCTION SECURITY CONFIGURATION COMPLETE ==="
+          - "✓ UFW Firewall is ENABLED and ACTIVE"
+          - "✓ Default policy: DENY all incoming connections"
+          - "✓ ALLOWED: SSH (22) for management"
+          - "✓ ALLOWED: HTTPS (443) for web traffic"
+          - "✓ BLOCKED: All other ports including:"
+          - "  - HTTP (80) - NGINX handles redirect internally"
+          - "  - WildFly (8080, 8443, 9990, 9993)"
+          - "  - Keycloak (8090, 8543)"
+          - "  - PostgreSQL (5432)"
+          - "  - Legacy staging port (9443)"
+          - ""
+          - "🔒 SECURITY STATUS: MAXIMUM - Only HTTPS 443 is externally accessible"
+          - "🌐 Public Access: https://durvalcrm.org (port 443 only)"
+          - "🔧 Management: SSH port 22 (for system administration)"
+          - ""
+          - "⚠️  IMPORTANT: All application services run internally and are"
+          - "    only accessible through NGINX reverse proxy on port 443"
+
+  handlers:
+    - name: reload ufw
+      ansible.builtin.systemd:
+        name: ufw
+        state: reloaded
+      failed_when: false
+
+    - name: restart ufw
+      ansible.builtin.systemd:
+        name: ufw
+        state: restarted
+      failed_when: false

@@ -1,0 +1,11 @@
+# WildFly CLI script to install PostgreSQL JDBC driver
+# This script installs the PostgreSQL driver as a proper module
+
+# Connect to the server
+connect
+
+# Install PostgreSQL driver as a module
+/subsystem=datasources/jdbc-driver=postgresql:add(driver-name="postgresql",driver-module-name="org.postgresql",driver-class-name="org.postgresql.Driver",driver-xa-datasource-class-name="org.postgresql.xa.PGXADataSource")
+
+# Exit
+quit

@@ -1,0 +1,1 @@
+- A arquitetura de deployment do projeto DurvalCRM no ambiente de producao deve permitir o recebimento de requisições e envio de respostas somente através da porta HTTPS 9443

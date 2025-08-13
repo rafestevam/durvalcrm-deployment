@@ -1,0 +1,14 @@
+# WildFly CLI script to configure PostgreSQL datasource for DurvalCRM
+# This script configures the DurvalCRMDS datasource required by the application
+
+# Connect to the server
+connect
+
+# Add the DurvalCRM datasource using the postgresql module driver
+/subsystem=datasources/data-source=DurvalCRMDS:add(jndi-name=java:jboss/datasources/DurvalCRMDS,driver-name=postgresql,connection-url=jdbc:postgresql://localhost:5432/durvalcrm,user-name=durvalcrm_user,password=durvalcrm@2025,min-pool-size=5,max-pool-size=20,pool-prefill=true,transaction-isolation=TRANSACTION_READ_COMMITTED,check-valid-connection-sql="SELECT 1",validate-on-match=true,background-validation=false)
+
+# Enable the datasource
+/subsystem=datasources/data-source=DurvalCRMDS:enable
+
+# Exit
+quit
