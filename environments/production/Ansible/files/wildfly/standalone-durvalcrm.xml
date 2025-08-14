@@ -500,7 +500,7 @@
         <subsystem xmlns="urn:jboss:domain:naming:2.0">
             <bindings>
                 <simple name="java:global/durvalcrm/keycloak/public-url" value="${KEYCLOAK_PUBLIC_URL:https://durvalcrm.org:9443/auth}" type="java.lang.String"/>
-                <simple name="java:global/durvalcrm/keycloak/internal-url" value="http://durvalcrm.org:8090" type="java.lang.String"/>
+                <simple name="java:global/durvalcrm/keycloak/internal-url" value="https://admin.durvalcrm.org" type="java.lang.String"/>
                 <simple name="java:global/durvalcrm/keycloak/client-id" value="durvalcrm-app" type="java.lang.String"/>
                 <simple name="java:global/durvalcrm/keycloak/realm" value="durval-crm" type="java.lang.String"/>
             </bindings>

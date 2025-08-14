@@ -25,6 +25,8 @@
     app_base_url_localhost: "https://localhost:9443"
     app_base_url_127: "https://127.0.0.1:9443"
     app_base_url_production: "https://durvalcrm.org"
+    app_base_url_admin: "https://admin.durvalcrm.org"
+    app_base_url_crm: "https://crm.durvalcrm.org"
     app_context_path: "/crm"
     redirect_uris:
       - "{{ app_base_url_localhost }}{{ app_context_path }}/*"
@@ -34,10 +36,16 @@
       - "{{ app_base_url_production }}{{ app_context_path }}/*"
       - "{{ app_base_url_production }}/admin/*"
       - "{{ app_base_url_production }}{{ app_context_path }}/auth/callback"
+      - "{{ app_base_url_admin }}/*"
+      - "{{ app_base_url_admin }}/realms/*"
+      - "{{ app_base_url_crm }}/*"
+      - "{{ app_base_url_crm }}/auth/callback"
     web_origins:
       - "{{ app_base_url_localhost }}"
       - "{{ app_base_url_127 }}"
       - "{{ app_base_url_production }}"
+      - "{{ app_base_url_admin }}"
+      - "{{ app_base_url_crm }}"
 
   tasks:
     - name: Update apt cache
@@ -67,9 +75,6 @@
       ansible.builtin.postgresql_db:
         name: "{{ keycloak_db_name }}"
         encoding: UTF-8
-        lc_collate: en_US.UTF-8
-        lc_ctype: en_US.UTF-8
-        template: template0
         owner: "{{ keycloak_db_user }}"
         state: present
 
@@ -155,7 +160,7 @@
 
     - name: Set Java home fact
       ansible.builtin.set_fact:
-        java_home: "{{ java_home_path.stdout | default('/usr/lib/jvm/java-1.17.0-openjdk-arm64') }}"
+        java_home: "{{ java_home_path.stdout | default('/usr/lib/jvm/java-1.17.0-openjdk-amd64') }}"
 
     - name: Create Keycloak configuration file
       ansible.builtin.copy:
@@ -174,12 +179,12 @@
           # HTTPS Configuration  
           https-port={{ keycloak_https_port }}
           
-          # Hostname Configuration - Force HTTPS
-          hostname=localhost
-          hostname-port=9443
-          hostname-url=https://localhost:9443
-          hostname-admin-url=https://localhost:9443
-          hostname-strict=true
+          # Hostname Configuration - Production
+          hostname=admin.durvalcrm.org
+          hostname-port=443
+          hostname-url=https://admin.durvalcrm.org
+          hostname-admin-url=https://admin.durvalcrm.org
+          hostname-strict=false
           hostname-strict-https=true
           
           # Proxy Configuration - Edge proxy with X-Forwarded headers
@@ -223,11 +228,11 @@
           Environment="KEYCLOAK_HOME={{ keycloak_home }}"
           Environment="KEYCLOAK_ADMIN={{ keycloak_admin_user }}"
           Environment="KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }}"
-          Environment="KC_HOSTNAME=localhost"
-          Environment="KC_HOSTNAME_PORT=9443"
-          Environment="KC_HOSTNAME_URL=https://localhost:9443"
-          Environment="KC_HOSTNAME_ADMIN_URL=https://localhost:9443"
-          Environment="KC_HOSTNAME_STRICT=true"
+          Environment="KC_HOSTNAME=admin.durvalcrm.org"
+          Environment="KC_HOSTNAME_PORT=443"
+          Environment="KC_HOSTNAME_URL=https://admin.durvalcrm.org"
+          Environment="KC_HOSTNAME_ADMIN_URL=https://admin.durvalcrm.org"
+          Environment="KC_HOSTNAME_STRICT=false"
           Environment="KC_HOSTNAME_STRICT_HTTPS=true"
           Environment="KC_PROXY=edge"
           Environment="KC_PROXY_HEADERS=xforwarded"
@@ -263,8 +268,8 @@
         msg: 
           - "Keycloak configuration created at: {{ keycloak_home }}/conf/keycloak.conf"
           - "Key settings:"
-          - "  - hostname=localhost:9443"
-          - "  - hostname-admin-url=https://localhost:9443" 
+          - "  - hostname=admin.durvalcrm.org:443"
+          - "  - hostname-admin-url=https://admin.durvalcrm.org" 
           - "  - proxy=edge"
           - "  - http-enabled=true on port {{ keycloak_http_port }}"
 
