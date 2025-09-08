@@ -3,8 +3,8 @@
   hosts: vm-production
   become: yes
   vars:
-    main_domain: "durvalcrm.org"
-    cert_email: "admin@durvalcrm.org"
+    main_domain: "cecairbar.org.br"
+    cert_email: "admin@cecairbar.org.br"
     wildfly_home: "/opt/wildfly"
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
@@ -14,19 +14,19 @@
     # List of all subdomains to create certificates for
     subdomains:
       - name: "crm"
-        full_domain: "crm.durvalcrm.org"
+        full_domain: "crm.cecairbar.org.br"
         description: "CRM Frontend Application"
       - name: "api"
-        full_domain: "api.durvalcrm.org"
+        full_domain: "api.cecairbar.org.br"
         description: "API Backend Service"
       - name: "admin"
-        full_domain: "admin.durvalcrm.org"
+        full_domain: "admin.cecairbar.org.br"
         description: "Keycloak Admin Console"
       - name: "wildfly"
-        full_domain: "wildfly.durvalcrm.org"
+        full_domain: "wildfly.cecairbar.org.br"
         description: "WildFly Application Server"
       - name: "management"
-        full_domain: "management.durvalcrm.org"
+        full_domain: "management.cecairbar.org.br"
         description: "WildFly Management Console"
 
   tasks:
@@ -359,7 +359,7 @@
           
           server {
               listen 443 ssl http2;
-              server_name crm.durvalcrm.org;  # or any of the other subdomains
+              server_name crm.cecairbar.org.br;  # or any of the other subdomains
               
               ssl_certificate {{ certificates_dir }}/server.crt;
               ssl_certificate_key {{ certificates_dir }}/server.key;
@@ -372,7 +372,7 @@
           ========================
           To verify certificate: openssl x509 -in server.crt -text -noout
           To check SAN: openssl x509 -in server.crt -text -noout | grep -A 10 "Subject Alternative Name"
-          To test SSL: openssl s_client -connect crm.durvalcrm.org:443 -servername crm.durvalcrm.org
+          To test SSL: openssl s_client -connect crm.cecairbar.org.br:443 -servername crm.cecairbar.org.br
           
         dest: "{{ certificates_dir }}/README-MultiDomain.txt"
         owner: "{{ ansible_user }}"

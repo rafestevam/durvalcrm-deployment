@@ -61,7 +61,7 @@
 
     - name: Test Keycloak realm after fix
       ansible.builtin.uri:
-        url: "https://admin.durvalcrm.org/realms/{{ realm_name }}"
+        url: "https://admin.cecairbar.org.br/realms/{{ realm_name }}"
         method: GET
         validate_certs: no
         status_code: 200
@@ -70,7 +70,7 @@
 
     - name: Test OpenID configuration
       ansible.builtin.uri:
-        url: "https://admin.durvalcrm.org/realms/{{ realm_name }}/.well-known/openid_configuration"
+        url: "https://admin.cecairbar.org.br/realms/{{ realm_name }}/.well-known/openid_configuration"
         method: GET
         validate_certs: no
         status_code: 200

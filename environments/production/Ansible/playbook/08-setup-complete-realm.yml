@@ -70,7 +70,7 @@
 
     - name: Test realm through nginx proxy
       ansible.builtin.uri:
-        url: "https://admin.durvalcrm.org/realms/durval-crm"
+        url: "https://admin.cecairbar.org.br/realms/durval-crm"
         method: GET
         validate_certs: no
         status_code: 200
@@ -79,7 +79,7 @@
 
     - name: Test OpenID configuration through proxy
       ansible.builtin.uri:
-        url: "https://admin.durvalcrm.org/realms/durval-crm/.well-known/openid_configuration"
+        url: "https://admin.cecairbar.org.br/realms/durval-crm/.well-known/openid_configuration"
         method: GET
         validate_certs: no
         status_code: 200
@@ -102,7 +102,7 @@
 
     - name: Test API endpoint through nginx
       ansible.builtin.uri:
-        url: "https://crm.durvalcrm.org/api/auth/login-info"
+        url: "https://crm.cecairbar.org.br/api/auth/login-info"
         method: GET
         validate_certs: no
         status_code: 200
@@ -123,7 +123,7 @@
           - "   ✅ User: tesouraria / cairbar@2025"
           - "   ✅ Issuer URL: {{ issuer_url }}"
           - "   ✅ Redirect URIs configured for:"
-          - "      - https://crm.durvalcrm.org/auth/callback"
-          - "      - https://crm.durvalcrm.org/crm/auth/callback"
+          - "      - https://crm.cecairbar.org.br/auth/callback"
+          - "      - https://crm.cecairbar.org.br/crm/auth/callback"
           - ""
           - "🧪 Ready for login testing!"

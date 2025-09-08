@@ -121,7 +121,7 @@
       ansible.builtin.debug:
         msg: 
           - "HTTPS Port 443 Test: {{ 'SUCCESS - Port is accessible' if https_test is succeeded else 'FAILED - Port is not accessible' }}"
-          - "Production URL: https://durvalcrm.org"
+          - "Production URL: https://cecairbar.org.br"
 
     - name: Test that blocked ports are indeed blocked (from localhost)
       ansible.builtin.shell: |
@@ -166,7 +166,7 @@
           - "  - Legacy staging port (9443)"
           - ""
           - "🔒 SECURITY STATUS: MAXIMUM - Only HTTPS 443 is externally accessible"
-          - "🌐 Public Access: https://durvalcrm.org (port 443 only)"
+          - "🌐 Public Access: https://cecairbar.org.br (port 443 only)"
           - "🔧 Management: SSH port 22 (for system administration)"
           - ""
           - "⚠️  IMPORTANT: All application services run internally and are"
