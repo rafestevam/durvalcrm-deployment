@@ -274,8 +274,8 @@
 
     - name: Configure management interface for HTTPS proxy access
       ansible.builtin.shell: |
-        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/management-interface=http-interface:write-attribute(name=allowed-origins,value=[\"https://localhost:9443\"])"
-        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/management-interface=http-interface:write-attribute(name=server-name,value=\"localhost\")"
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/management-interface=http-interface:write-attribute(name=allowed-origins,value=[\"https://{{ ansible_default_ipv4.address }}:9443\",\"https://localhost:9443\"])"
+        {{ wildfly_home }}/bin/jboss-cli.sh --connect --command="/core-service=management/management-interface=http-interface:write-attribute(name=server-name,value=\"{{ ansible_default_ipv4.address }}\")"
       become: yes
       become_user: "{{ wildfly_user }}"
       environment:

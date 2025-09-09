@@ -22,8 +22,8 @@
     postgres_admin_password: "postgres"
     # Client configuration variables - Updated for HTTPS 9443
     client_name: "durvalcrm-app"
-    app_base_url_localhost: "https://localhost:9443"
-    app_base_url_127: "https://127.0.0.1:9443"
+    app_base_url_localhost: "https://{{ ansible_default_ipv4.address }}:9443"
+    app_base_url_127: "https://{{ ansible_default_ipv4.address }}:9443"
     app_context_path: "/crm"
     redirect_uris:
       - "{{ app_base_url_localhost }}{{ app_context_path }}/*"
@@ -170,10 +170,10 @@
           https-port={{ keycloak_https_port }}
           
           # Hostname Configuration - Force HTTPS
-          hostname=localhost
+          hostname={{ ansible_default_ipv4.address }}
           hostname-port=9443
-          hostname-url=https://localhost:9443
-          hostname-admin-url=https://localhost:9443
+          hostname-url=https://{{ ansible_default_ipv4.address }}:9443
+          hostname-admin-url=https://{{ ansible_default_ipv4.address }}:9443
           hostname-strict=true
           hostname-strict-https=true
           
@@ -218,10 +218,10 @@
           Environment="KEYCLOAK_HOME={{ keycloak_home }}"
           Environment="KEYCLOAK_ADMIN={{ keycloak_admin_user }}"
           Environment="KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }}"
-          Environment="KC_HOSTNAME=localhost"
+          Environment="KC_HOSTNAME={{ ansible_default_ipv4.address }}"
           Environment="KC_HOSTNAME_PORT=9443"
-          Environment="KC_HOSTNAME_URL=https://localhost:9443"
-          Environment="KC_HOSTNAME_ADMIN_URL=https://localhost:9443"
+          Environment="KC_HOSTNAME_URL=https://{{ ansible_default_ipv4.address }}:9443"
+          Environment="KC_HOSTNAME_ADMIN_URL=https://{{ ansible_default_ipv4.address }}:9443"
           Environment="KC_HOSTNAME_STRICT=true"
           Environment="KC_HOSTNAME_STRICT_HTTPS=true"
           Environment="KC_PROXY=edge"
@@ -258,8 +258,8 @@
         msg: 
           - "Keycloak configuration created at: {{ keycloak_home }}/conf/keycloak.conf"
           - "Key settings:"
-          - "  - hostname=localhost:9443"
-          - "  - hostname-admin-url=https://localhost:9443" 
+          - "  - hostname={{ ansible_default_ipv4.address }}:9443"
+          - "  - hostname-admin-url=https://{{ ansible_default_ipv4.address }}:9443" 
           - "  - proxy=edge"
           - "  - http-enabled=true on port {{ keycloak_http_port }}"
 

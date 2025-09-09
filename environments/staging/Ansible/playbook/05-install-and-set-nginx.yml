@@ -49,7 +49,7 @@
         state: stopped
 
     - name: Copy NGINX development configuration file
-      ansible.builtin.copy:
+      ansible.builtin.template:
         src: ../files/nginx/{{ nginx_config_file }}
         dest: "/tmp/{{ nginx_config_file }}"
         owner: root
@@ -86,26 +86,26 @@
 
     - name: Create certificates directory
       ansible.builtin.file:
-        path: /home/vagrant/certificates
+        path: /etc/ssl/private
         state: directory
-        owner: vagrant
-        group: vagrant
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Generate self-signed SSL certificate
       ansible.builtin.command:
-        cmd: openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /home/vagrant/certificates/server.key -out /home/vagrant/certificates/server.crt -subj "/C=BR/ST=SP/L=SaoPaulo/O=DurvalCRM/OU=IT/CN=localhost"
-        creates: /home/vagrant/certificates/server.crt
+        cmd: openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/ssl/private/server.key -out /etc/ssl/private/server.crt -subj "/C=BR/ST=SP/L=SaoPaulo/O=DurvalCRM/OU=IT/CN={{ ansible_default_ipv4.address }}" -addext "subjectAltName=DNS:{{ ansible_default_ipv4.address }},DNS:localhost,IP:{{ ansible_default_ipv4.address }},IP:127.0.0.1"
+        creates: /etc/ssl/private/server.crt
 
     - name: Set proper permissions for SSL certificates
       ansible.builtin.file:
         path: "{{ item }}"
-        owner: vagrant
-        group: vagrant
+        owner: root
+        group: root
         mode: '0600'
       loop:
-        - /home/vagrant/certificates/server.key
-        - /home/vagrant/certificates/server.crt
+        - /etc/ssl/private/server.key
+        - /etc/ssl/private/server.crt
 
     - name: Test NGINX configuration syntax
       ansible.builtin.command:
