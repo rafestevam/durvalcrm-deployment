@@ -237,7 +237,6 @@
           Environment="KC_PROXY=edge"
           Environment="KC_PROXY_HEADERS=xforwarded"
           ExecStart={{ keycloak_home }}/bin/kc.sh start
-          ExecStop={{ keycloak_home }}/bin/kc.sh stop
           TimeoutStartSec=600
           TimeoutStopSec=600
           Restart=on-failure

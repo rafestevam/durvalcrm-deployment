@@ -1,0 +1,221 @@
+---
+- name: Setup Directus PostgreSQL Database
+  hosts: vm-production
+  become: yes
+  vars:
+    directus_db_name: "directus"
+    directus_db_user: "directus_user"
+    directus_db_password: "directus@2025"
+    postgresql_version: "16"
+
+  tasks:
+    - name: Check if PostgreSQL is installed
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+      register: pg_check
+      failed_when: false
+
+    - name: Fail if PostgreSQL is not installed
+      ansible.builtin.fail:
+        msg: "PostgreSQL is not installed. Please run 01-install-and-set-postgres.yml first."
+      when: pg_check.status.ActiveState != 'active'
+
+    - name: Get PostgreSQL version
+      ansible.builtin.shell: |
+        ls /etc/postgresql/ | head -n1
+      register: pg_version
+      changed_when: false
+
+    - name: Set PostgreSQL version fact
+      ansible.builtin.set_fact:
+        detected_pg_version: "{{ pg_version.stdout }}"
+
+    - name: Display PostgreSQL version
+      ansible.builtin.debug:
+        msg: "Configuring Directus database on PostgreSQL {{ detected_pg_version }}"
+
+    - name: Create Directus PostgreSQL user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_user:
+        name: "{{ directus_db_user }}"
+        password: "{{ directus_db_password }}"
+        encrypted: yes
+        state: present
+      register: user_creation
+
+    - name: Display user creation status
+      ansible.builtin.debug:
+        msg: "Directus user '{{ directus_db_user }}' {{ 'created' if user_creation.changed else 'already exists' }}"
+
+    - name: Create Directus database
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_db:
+        name: "{{ directus_db_name }}"
+        encoding: UTF-8
+        lc_collate: en_US.UTF-8
+        lc_ctype: en_US.UTF-8
+        template: template0
+        owner: "{{ directus_db_user }}"
+        state: present
+      register: db_creation
+
+    - name: Display database creation status
+      ansible.builtin.debug:
+        msg: "Directus database '{{ directus_db_name }}' {{ 'created' if db_creation.changed else 'already exists' }}"
+
+    - name: Grant database privileges to Directus user
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: "{{ directus_db_name }}"
+        roles: "{{ directus_db_user }}"
+        type: database
+        privs: ALL
+        state: present
+
+    - name: Grant all privileges on schema public
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: "{{ directus_db_name }}"
+        roles: "{{ directus_db_user }}"
+        type: schema
+        objs: public
+        privs: ALL
+        state: present
+
+    - name: Grant all privileges on all tables in schema public
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: "{{ directus_db_name }}"
+        roles: "{{ directus_db_user }}"
+        type: table
+        objs: ALL_IN_SCHEMA
+        schema: public
+        privs: ALL
+        state: present
+
+    - name: Grant all privileges on all sequences in schema public
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        database: "{{ directus_db_name }}"
+        roles: "{{ directus_db_user }}"
+        type: sequence
+        objs: ALL_IN_SCHEMA
+        schema: public
+        privs: ALL
+        state: present
+
+    - name: Set default privileges for future tables
+      become: yes
+      become_user: postgres
+      ansible.builtin.shell: |
+        psql -d {{ directus_db_name }} -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {{ directus_db_user }};"
+        psql -d {{ directus_db_name }} -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {{ directus_db_user }};"
+        psql -d {{ directus_db_name }} -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO {{ directus_db_user }};"
+      register: default_privs
+      changed_when: false
+
+    - name: Enable required PostgreSQL extensions for Directus
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_ext:
+        name: "{{ item }}"
+        db: "{{ directus_db_name }}"
+        state: present
+      loop:
+        - uuid-ossp
+        - pg_trgm
+      ignore_errors: yes
+      register: extensions_result
+
+    - name: Display extensions installation status
+      ansible.builtin.debug:
+        msg: "PostgreSQL extensions for Directus: {{ 'installed successfully' if extensions_result is succeeded else 'some extensions may have failed' }}"
+
+    - name: Test PostgreSQL connectivity for Directus database
+      ansible.builtin.postgresql_ping:
+        db: "{{ directus_db_name }}"
+        login_host: localhost
+        login_user: "{{ directus_db_user }}"
+        login_password: "{{ directus_db_password }}"
+      register: directus_pg_test
+
+    - name: Display connectivity test result
+      ansible.builtin.debug:
+        msg: "Directus PostgreSQL connectivity test: {{ 'PASSED ✓' if directus_pg_test.is_available else 'FAILED ✗' }}"
+
+    - name: Verify database exists and get size
+      become: yes
+      become_user: postgres
+      ansible.builtin.shell: |
+        psql -c "SELECT pg_database.datname, pg_size_pretty(pg_database_size(pg_database.datname)) AS size FROM pg_database WHERE datname = '{{ directus_db_name }}';"
+      register: db_info
+      changed_when: false
+
+    - name: Display database information
+      ansible.builtin.debug:
+        msg: "{{ db_info.stdout_lines }}"
+
+    - name: Create summary file with connection details
+      ansible.builtin.copy:
+        dest: /tmp/directus-postgres-config.txt
+        content: |
+          ==========================================
+          Directus PostgreSQL Configuration
+          ==========================================
+
+          Database Name: {{ directus_db_name }}
+          Database User: {{ directus_db_user }}
+          Database Password: {{ directus_db_password }}
+          Host: {{ ansible_default_ipv4.address }}
+          Port: 5432
+
+          Connection String:
+          postgresql://{{ directus_db_user }}:{{ directus_db_password }}@{{ ansible_default_ipv4.address }}:5432/{{ directus_db_name }}
+
+          Environment Variables for Directus:
+          DB_CLIENT=postgres
+          DB_HOST={{ ansible_default_ipv4.address }}
+          DB_PORT=5432
+          DB_DATABASE={{ directus_db_name }}
+          DB_USER={{ directus_db_user }}
+          DB_PASSWORD={{ directus_db_password }}
+
+          Local Connection (from server):
+          postgresql://{{ directus_db_user }}:{{ directus_db_password }}@localhost:5432/{{ directus_db_name }}
+
+          ==========================================
+          Setup completed at: {{ ansible_date_time.iso8601 }}
+          ==========================================
+        mode: '0644'
+
+    - name: Fetch configuration file to local machine
+      ansible.builtin.fetch:
+        src: /tmp/directus-postgres-config.txt
+        dest: /tmp/directus-postgres-config-{{ inventory_hostname }}.txt
+        flat: yes
+
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Directus PostgreSQL Setup Complete!"
+          - "=========================================="
+          - ""
+          - "Database: {{ directus_db_name }}"
+          - "User: {{ directus_db_user }}"
+          - "Password: {{ directus_db_password }}"
+          - "Host: {{ ansible_default_ipv4.address }}"
+          - "Port: 5432"
+          - ""
+          - "Connection String:"
+          - "postgresql://{{ directus_db_user }}:{{ directus_db_password }}@{{ ansible_default_ipv4.address }}:5432/{{ directus_db_name }}"
+          - ""
+          - "Configuration saved to: /tmp/directus-postgres-config-{{ inventory_hostname }}.txt"
+          - "=========================================="

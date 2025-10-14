@@ -28,6 +28,9 @@
       - name: "management"
         full_domain: "management.cecairbar.org.br"
         description: "WildFly Management Console"
+      - name: "directus"
+        full_domain: "directus.cecairbar.org.br"
+        description: "Directus CMS"
 
   tasks:
     - name: Update apt cache
@@ -44,6 +47,8 @@
           - python3-cryptography
           - default-jdk
           - nginx  # Needed for webroot plugin
+          - lsof   # Needed for port checking
+          - dnsutils  # Needed for nslookup
         state: present
 
     - name: Create certificate directory in ansible_user home
@@ -82,15 +87,46 @@
         dest: /usr/bin/certbot
         state: link
 
-    - name: Stop services that might use port 80/443
+    - name: Check which services are installed
       ansible.builtin.systemd:
         name: "{{ item }}"
-        state: stopped
+      register: service_check
       loop:
         - apache2
         - nginx
         - wildfly
         - keycloak
+      failed_when: false
+      changed_when: false
+
+    - name: Stop services that might use port 80/443 (only if installed)
+      ansible.builtin.systemd:
+        name: "{{ item.item }}"
+        state: stopped
+      loop: "{{ service_check.results }}"
+      when: item.status is defined and item.status.LoadState == "loaded"
+      ignore_errors: yes
+
+    - name: Kill any process using port 80
+      ansible.builtin.shell: |
+        lsof -ti:80 | xargs -r kill -9
+      failed_when: false
+      changed_when: false
+
+    - name: Kill any process using port 443
+      ansible.builtin.shell: |
+        lsof -ti:443 | xargs -r kill -9
+      failed_when: false
+      changed_when: false
+
+    - name: Wait for ports to be released
+      ansible.builtin.wait_for:
+        port: "{{ item }}"
+        state: stopped
+        timeout: 30
+      loop:
+        - 80
+        - 443
       ignore_errors: yes
 
     # Create a single certificate with all subdomains as SAN (Subject Alternative Names)
@@ -100,9 +136,104 @@
 
     - name: Display domain list for certificate
       ansible.builtin.debug:
-        msg: 
+        msg:
           - "Creating Let's Encrypt certificate for domains:"
           - "{{ subdomains | map(attribute='full_domain') | list }}"
+          - ""
+          - "⚠️  Important Prerequisites:"
+          - "   1. DNS must be configured for all domains to point to this server"
+          - "   2. Ports 80 and 443 must be accessible from the internet"
+          - "   3. No rate limiting from Let's Encrypt"
+
+    - name: Get server public IP address
+      ansible.builtin.set_fact:
+        server_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Check DNS resolution for all domains with detailed IP check
+      ansible.builtin.shell: |
+        resolved_ip=$(dig +short {{ item.full_domain }} @8.8.8.8 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+        if [ -z "$resolved_ip" ]; then
+          echo "NOT_RESOLVED"
+        else
+          echo "$resolved_ip"
+        fi
+      register: dns_check
+      loop: "{{ subdomains }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Analyze DNS results
+      ansible.builtin.set_fact:
+        dns_issues: "{{ dns_check.results | selectattr('stdout', 'ne', server_ip) | list }}"
+        dns_ok: "{{ dns_check.results | selectattr('stdout', 'eq', server_ip) | list }}"
+
+    - name: Display detailed DNS check results
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "DNS Resolution Check"
+          - "=========================================="
+          - ""
+          - "Server IP: {{ server_ip }}"
+          - ""
+          - "Summary:"
+          - "  ✅ Correct DNS: {{ dns_ok | length }}/{{ subdomains | length }}"
+          - "  ❌ Wrong/Missing DNS: {{ dns_issues | length }}/{{ subdomains | length }}"
+          - ""
+
+    - name: Show each domain DNS status
+      ansible.builtin.debug:
+        msg:
+          - "Domain: {{ item.item.full_domain }}"
+          - "  Resolved IP: {{ item.stdout if item.stdout != 'NOT_RESOLVED' else '❌ NOT RESOLVED' }}"
+          - "  Status: {{ '✅ OK' if item.stdout == server_ip else '❌ WRONG IP' if item.stdout != 'NOT_RESOLVED' else '❌ NOT CONFIGURED' }}"
+      loop: "{{ dns_check.results }}"
+
+    - name: Show DNS configuration instructions if there are issues
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "⚠️  DNS CONFIGURATION REQUIRED ⚠️"
+          - "=========================================="
+          - ""
+          - "{{ dns_issues | length }} domain(s) have DNS issues."
+          - ""
+          - "REQUIRED ACTIONS:"
+          - "1. Access your DNS provider (Hostinger, Cloudflare, etc.)"
+          - "2. Add/Update A records to point to {{ server_ip }}"
+          - "3. Wait for DNS propagation (5 minutes to 48 hours)"
+          - "4. Verify with: nslookup {{ dns_issues[0].item.full_domain }} 8.8.8.8"
+          - "5. Re-run this playbook after DNS is fixed"
+          - ""
+          - "⚠️  Certificate generation will FAIL without correct DNS!"
+          - "=========================================="
+      when: dns_issues | length > 0
+
+    - name: Show each problematic domain
+      ansible.builtin.debug:
+        msg:
+          - "• {{ item.item.full_domain }}"
+          - "  Current IP: {{ item.stdout if item.stdout != 'NOT_RESOLVED' else 'Not configured' }}"
+          - "  Required IP: {{ server_ip }}"
+          - "  Required DNS: {{ item.item.full_domain }}    A    {{ server_ip }}"
+      loop: "{{ dns_issues }}"
+      when: dns_issues | length > 0
+
+    - name: Pause to allow user to fix DNS before continuing
+      ansible.builtin.pause:
+        prompt: |
+
+          ⚠️  DNS ISSUES DETECTED! ⚠️
+
+          {{ dns_issues | length }} domain(s) do not point to this server ({{ server_ip }}).
+          Let's Encrypt certificate generation will FAIL without correct DNS.
+
+          Options:
+          1. Press Ctrl+C then 'A' to ABORT and fix DNS first (RECOMMENDED)
+          2. Press ENTER to CONTINUE anyway (will likely fail)
+
+          What do you want to do?
+      when: dns_issues | length > 0
 
     - name: Obtain Let's Encrypt certificate for all subdomains using standalone mode
       ansible.builtin.shell: |
@@ -114,7 +245,7 @@
           --expand \
           --force-renewal
       register: certbot_result
-      failed_when: certbot_result.rc != 0
+      failed_when: false
       vars:
         domain_list: "{{ subdomains | map(attribute='full_domain') | join(' -d ') }}"
 
@@ -123,13 +254,75 @@
         msg:
           - "Certbot execution result:"
           - "Return code: {{ certbot_result.rc }}"
-          - "Output: {{ certbot_result.stdout_lines }}"
-          - "Error: {{ certbot_result.stderr_lines if certbot_result.stderr_lines is defined else 'No errors' }}"
+          - "Status: {{ 'SUCCESS ✅' if certbot_result.rc == 0 else 'FAILED ❌' }}"
+          - ""
+          - "Output:"
+          - "{{ certbot_result.stdout_lines }}"
+
+    - name: Show certbot errors if failed
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "Errors:"
+          - "{{ certbot_result.stderr_lines }}"
+      when: certbot_result.rc != 0
+
+    - name: Check if certbot failed and provide troubleshooting
+      ansible.builtin.debug:
+        msg:
+          - "❌ Certificate generation FAILED!"
+          - ""
+          - "⚠️  WARNING: The playbook will continue, but certificate-dependent tasks will be skipped."
+          - ""
+          - "Common causes:"
+          - "  1. DNS not configured: Domains must resolve to {{ ansible_default_ipv4.address }}"
+          - "     {{ '❌ DETECTED: ' + (dns_issues | length | string) + ' domain(s) with wrong/missing DNS' if dns_issues | length > 0 else '' }}"
+          - "  2. Firewall blocking: Ports 80/443 must be open"
+          - "  3. Rate limiting: Let's Encrypt limits certificate requests"
+          - "  4. Domain validation failed: ACME challenge couldn't be completed"
+      when: certbot_result.rc != 0
+
+    - name: Show DNS issues detail if present
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "🔍 DNS Issues Found:"
+          - "{{ dns_issues | length }} domain(s) with DNS problems"
+          - ""
+          - "FIX DNS FIRST! Configure A records to point to {{ server_ip }}"
+      when: certbot_result.rc != 0 and dns_issues | length > 0
+
+    - name: Show each DNS issue
+      ansible.builtin.debug:
+        msg: "   • {{ item.item.full_domain }}: {{ item.stdout if item.stdout != 'NOT_RESOLVED' else 'Not configured' }} (should be {{ server_ip }})"
+      loop: "{{ dns_issues }}"
+      when: certbot_result.rc != 0 and dns_issues | length > 0
+
+    - name: Show general troubleshooting steps
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "Troubleshooting:"
+          - "  1. {{ 'FIX DNS CONFIGURATION (see above)' if dns_issues | length > 0 else 'Run diagnostic: ansible-playbook -i inventory/hosts.ini playbook/00-diagnose-letsencrypt.yml' }}"
+          - "  2. Check LETSENCRYPT-TROUBLESHOOTING.md for detailed guide"
+          - "  3. Verify DNS: dig +short crm.cecairbar.org.br @8.8.8.8"
+          - "  4. Check firewall: sudo ufw status"
+          - "  5. Check ports: sudo lsof -i :80 && sudo lsof -i :443"
+          - "  6. View detailed logs: sudo tail -100 /var/log/letsencrypt/letsencrypt.log"
+          - ""
+          - "To retry manually after fixing DNS:"
+          - "  sudo certbot certonly --standalone --non-interactive \\"
+          - "    --agree-tos --email {{ cert_email }} \\"
+          - "    -d {{ subdomains | map(attribute='full_domain') | join(' -d ') }}"
+          - ""
+          - "Once DNS is fixed, re-run this playbook to complete the certificate setup."
+      when: certbot_result.rc != 0
 
     # Use the first subdomain as the primary certificate directory
     - name: Set primary certificate domain
       ansible.builtin.set_fact:
         primary_domain: "{{ subdomains[0].full_domain }}"
+      when: certbot_result.rc == 0
 
     - name: Copy Let's Encrypt certificate to main certificates directory
       ansible.builtin.copy:
@@ -139,6 +332,7 @@
         group: "{{ ansible_user }}"
         mode: '0644'
         remote_src: yes
+      when: certbot_result.rc == 0
 
     - name: Copy Let's Encrypt private key to main certificates directory
       ansible.builtin.copy:
@@ -148,6 +342,7 @@
         group: "{{ ansible_user }}"
         mode: '0600'
         remote_src: yes
+      when: certbot_result.rc == 0
 
     # Copy certificates to individual subdomain directories for organization
     - name: Copy certificates to individual subdomain directories
@@ -159,6 +354,7 @@
         mode: "{{ '0600' if 'key' in item[1] else '0644' }}"
         remote_src: yes
       loop: "{{ subdomains | product(['server.crt', 'server.key']) }}"
+      when: certbot_result.rc == 0
 
     - name: Generate PEM bundle (certificate + key) in main directory
       ansible.builtin.shell: |
@@ -167,6 +363,7 @@
             > {{ certificates_dir }}/server.pem
       args:
         creates: "{{ certificates_dir }}/server.pem"
+      when: certbot_result.rc == 0
 
     - name: Generate PEM bundles for individual subdomains
       ansible.builtin.shell: |
@@ -176,6 +373,7 @@
       args:
         creates: "{{ certificates_dir }}/{{ item.name }}/server.pem"
       loop: "{{ subdomains }}"
+      when: certbot_result.rc == 0
 
     - name: Set proper permissions for all PEM bundles
       ansible.builtin.file:
@@ -186,6 +384,7 @@
       loop: "{{ [''] + (subdomains | map(attribute='name') | list) }}"
       vars:
         item: "{{ item if item else '' }}"
+      when: certbot_result.rc == 0
 
     - name: Generate DH parameters for enhanced security (this may take a while)
       community.crypto.openssl_dhparam:
@@ -194,6 +393,7 @@
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
         mode: '0644'
+      when: certbot_result.rc == 0
 
     - name: Setup automatic certificate renewal with all subdomains
       ansible.builtin.cron:
@@ -202,6 +402,7 @@
         hour: "2"
         job: "/usr/bin/certbot renew --quiet --post-hook 'systemctl reload nginx && systemctl restart wildfly && systemctl restart keycloak'"
         user: root
+      when: certbot_result.rc == 0
 
     - name: Create PKCS12 keystore for Java applications
       community.crypto.openssl_pkcs12:
@@ -214,6 +415,7 @@
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
         mode: '0600'
+      when: certbot_result.rc == 0
 
     # ========== WILDFLY KEYSTORE CONFIGURATION ==========
 
@@ -230,12 +432,13 @@
         group: "{{ wildfly_group }}"
         mode: '0755'
         recurse: yes
-      when: wildfly_dir_check.stat.exists
+      when: certbot_result.rc == 0 and wildfly_dir_check.stat.exists
 
     - name: Check if source PKCS12 keystore exists
       ansible.builtin.stat:
         path: "{{ certificates_dir }}/keystore.p12"
       register: pkcs12_keystore_check
+      when: certbot_result.rc == 0
 
     - name: Create JKS keystore for WildFly management realm
       ansible.builtin.shell: |
@@ -250,7 +453,7 @@
           -srcalias durvalcrm-cert \
           -destalias production-management \
           -noprompt 2>&1
-      when: wildfly_dir_check.stat.exists and pkcs12_keystore_check.stat.exists
+      when: certbot_result.rc == 0 and wildfly_dir_check.stat.exists and pkcs12_keystore_check.stat.exists
       register: management_keystore_result
       failed_when: false
 
@@ -267,7 +470,7 @@
           -srcalias durvalcrm-cert \
           -destalias production-app \
           -noprompt 2>&1
-      when: wildfly_dir_check.stat.exists and pkcs12_keystore_check.stat.exists
+      when: certbot_result.rc == 0 and wildfly_dir_check.stat.exists and pkcs12_keystore_check.stat.exists
       register: application_keystore_result
       failed_when: false
 
@@ -280,7 +483,7 @@
       loop:
         - management
         - application
-      when: wildfly_dir_check.stat.exists
+      when: certbot_result.rc == 0 and wildfly_dir_check.stat.exists
 
     # ========== NGINX CERTIFICATE PREPARATION ==========
 
@@ -292,6 +495,7 @@
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
       loop: "{{ subdomains | product(['server.crt', 'server.key', 'server.pem']) }}"
+      when: certbot_result.rc == 0
       ignore_errors: yes
 
     # ========== CERTIFICATE INFORMATION AND VERIFICATION ==========
@@ -302,12 +506,14 @@
       register: cert_san_check
       changed_when: false
       failed_when: false
+      when: certbot_result.rc == 0
 
     - name: Display certificate Subject Alternative Names
       ansible.builtin.debug:
         msg:
           - "Certificate Subject Alternative Names:"
           - "{{ cert_san_check.stdout_lines if cert_san_check.rc == 0 else ['No SAN found or certificate read error'] }}"
+      when: certbot_result.rc == 0
 
     - name: Generate comprehensive certificate information file
       ansible.builtin.copy:
@@ -378,6 +584,7 @@
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
         mode: '0644'
+      when: certbot_result.rc == 0
 
     - name: Display certificate creation summary
       ansible.builtin.debug:
@@ -399,6 +606,7 @@
           - "   📦 server.pem - Combined certificate + key"
           - "   🔒 dhparam.pem - DH parameters"
           - "   ☕ keystore.p12 - Java keystore (password: changeit)"
+      when: certbot_result.rc == 0
 
     - name: Display WildFly keystore status
       ansible.builtin.debug:
@@ -408,18 +616,21 @@
           - "{{ '   🔑 Management keystore: ' + ('SUCCESS' if management_keystore_result.rc == 0 else 'FAILED') if wildfly_dir_check.stat.exists else '   ℹ️  Install WildFly first, then run this playbook again' }}"
           - "{{ '   🔑 Application keystore: ' + ('SUCCESS' if application_keystore_result.rc == 0 else 'FAILED') if wildfly_dir_check.stat.exists else '' }}"
           - "{{ '   🔐 Keystore password: production123' if wildfly_dir_check.stat.exists else '' }}"
+      when: certbot_result.rc == 0
 
     - name: Verify certificate validity and dates
       ansible.builtin.shell: |
         openssl x509 -in {{ certificates_dir }}/server.crt -noout -dates -subject
       register: cert_details
       changed_when: false
+      when: certbot_result.rc == 0
 
     - name: Display certificate validity information
       ansible.builtin.debug:
         msg:
           - "📅 Certificate Validity:"
           - "{{ cert_details.stdout_lines }}"
+      when: certbot_result.rc == 0
 
     - name: Test certificate for each subdomain
       ansible.builtin.shell: |
@@ -428,6 +639,7 @@
       changed_when: false
       failed_when: false
       loop: "{{ subdomains }}"
+      when: certbot_result.rc == 0
 
     - name: Display per-domain certificate test results
       ansible.builtin.debug:
@@ -436,6 +648,7 @@
           - "   Test results will vary based on DNS configuration"
           - ""
           - "ℹ️  Note: Failed tests are normal if DNS is not yet configured for these subdomains"
+      when: certbot_result.rc == 0
 
     - name: Final setup instructions
       ansible.builtin.debug:
@@ -456,3 +669,78 @@
           - "   All subdomains from configuration should work with HTTPS"
           - ""
           - "📖 For detailed information, see: {{ certificates_dir }}/README-MultiDomain.txt"
+      when: certbot_result.rc == 0
+
+    # ========== PLAYBOOK EXECUTION SUMMARY ==========
+
+    - name: Playbook execution summary - Certificate generation FAILED
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "   PLAYBOOK EXECUTION SUMMARY"
+          - "=========================================="
+          - ""
+          - "Status: ⚠️  INCOMPLETE (Certificate generation failed)"
+          - ""
+          - "✅ Completed tasks:"
+          - "   • Installed required packages (certbot, lsof, dnsutils, nginx)"
+          - "   • Created certificate directories"
+          - "   • Stopped services using ports 80/443"
+          - "   • Cleaned up ports 80 and 443"
+          - ""
+          - "❌ Failed task:"
+          - "   • Let's Encrypt certificate generation"
+          - ""
+          - "⚠️  Certificate-dependent tasks were SKIPPED:"
+          - "   • Certificate file copying"
+          - "   • PEM bundle generation"
+          - "   • DH parameters generation"
+          - "   • PKCS12/JKS keystore creation"
+          - "   • NGINX symbolic links creation"
+          - "   • Certificate verification"
+          - ""
+          - "📋 Next actions required:"
+          - "   1. Run diagnostic: ansible-playbook -i inventory/hosts.ini playbook/00-diagnose-letsencrypt.yml"
+          - "   2. Fix the identified issue (most likely DNS configuration)"
+          - "   3. Re-run this playbook: ansible-playbook -i inventory/hosts.ini playbook/00-set-security.yml"
+          - ""
+          - "📚 Documentation:"
+          - "   • LETSENCRYPT-TROUBLESHOOTING.md - Detailed troubleshooting guide"
+          - "   • 00-diagnose-letsencrypt.yml - Diagnostic playbook"
+          - "   • 00-fix-letsencrypt-issues.yml - Quick fix playbook"
+          - ""
+          - "=========================================="
+      when: certbot_result.rc != 0
+
+    - name: Playbook execution summary - SUCCESS
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "=========================================="
+          - "   PLAYBOOK EXECUTION SUMMARY"
+          - "=========================================="
+          - ""
+          - "Status: ✅ COMPLETED SUCCESSFULLY"
+          - ""
+          - "✅ All tasks completed:"
+          - "   • Installed required packages"
+          - "   • Generated Let's Encrypt certificate for {{ subdomains | length }} subdomains"
+          - "   • Created certificate files (PEM, CRT, KEY)"
+          - "   • Generated DH parameters for enhanced security"
+          - "   • Created PKCS12 keystore for Java applications"
+          - "{{ '   • Created JKS keystores for WildFly' if wildfly_dir_check.stat.exists else '   • WildFly not found (keystores skipped)' }}"
+          - "   • Created NGINX symbolic links"
+          - "   • Configured automatic renewal (daily at 2 AM)"
+          - ""
+          - "📁 Certificate location: {{ certificates_dir }}/"
+          - "📜 Documentation: {{ certificates_dir }}/README-MultiDomain.txt"
+          - ""
+          - "🚀 Next steps:"
+          - "   1. Update NGINX configuration to use the new certificates"
+          - "   2. Deploy updated NGINX configuration"
+          - "   3. Restart services (nginx, wildfly, keycloak)"
+          - "   4. Test HTTPS access for all subdomains"
+          - ""
+          - "=========================================="
+      when: certbot_result.rc == 0

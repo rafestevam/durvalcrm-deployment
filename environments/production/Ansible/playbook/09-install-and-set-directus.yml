@@ -1,0 +1,556 @@
+---
+- name: Install and Configure Directus CMS
+  hosts: vm-production
+  become: yes
+  vars:
+    # Node.js configuration
+    nodejs_version: "20"
+
+    # Directus configuration
+    directus_version: "latest"
+    directus_install_dir: "/opt/directus"
+    directus_user: "directus"
+    directus_group: "directus"
+    directus_port: "8055"
+
+    # Database configuration (from playbook 11-set-directus-postgres.yml)
+    directus_db_client: "postgres"
+    directus_db_host: "localhost"
+    directus_db_port: "5432"
+    directus_db_name: "directus"
+    directus_db_user: "directus_user"
+    directus_db_password: "directus@2025"
+
+    # Admin user configuration
+    directus_admin_email: "admin@cecairbar.org.br"
+    directus_admin_password: "Directus@2025"
+
+    # Security
+    directus_key: ""  # Will be generated
+    directus_secret: ""  # Will be generated
+
+    # Public URL
+    directus_public_url: "https://directus.cecairbar.org.br"
+
+  tasks:
+    # ============================================
+    # Prerequisites Check
+    # ============================================
+    - name: Check if PostgreSQL is running
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+      register: pg_check
+      failed_when: false
+
+    - name: Fail if PostgreSQL is not running
+      ansible.builtin.fail:
+        msg: "PostgreSQL is not running. Please run 01-install-and-set-postgres.yml and 11-set-directus-postgres.yml first."
+      when: pg_check.status.ActiveState != 'active'
+
+    - name: Check if Directus database exists
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_query:
+        db: postgres
+        query: "SELECT 1 FROM pg_database WHERE datname = '{{ directus_db_name }}'"
+      register: db_exists
+      failed_when: false
+
+    - name: Fail if Directus database doesn't exist
+      ansible.builtin.fail:
+        msg: "Directus database '{{ directus_db_name }}' not found. Please run 11-set-directus-postgres.yml first."
+      when: db_exists.rowcount == 0
+
+    # ============================================
+    # Install Node.js and NPM
+    # ============================================
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install prerequisites for Node.js
+      ansible.builtin.apt:
+        name:
+          - curl
+          - gnupg
+          - ca-certificates
+          - build-essential
+        state: present
+
+    - name: Add NodeSource GPG key
+      ansible.builtin.apt_key:
+        url: "https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key"
+        state: present
+
+    - name: Add NodeSource repository
+      ansible.builtin.apt_repository:
+        repo: "deb https://deb.nodesource.com/node_{{ nodejs_version }}.x nodistro main"
+        state: present
+        filename: nodesource
+
+    - name: Install Node.js
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: yes
+
+    - name: Verify Node.js installation
+      ansible.builtin.command: node --version
+      register: node_version
+      changed_when: false
+
+    - name: Verify NPM installation
+      ansible.builtin.command: npm --version
+      register: npm_version
+      changed_when: false
+
+    - name: Display Node.js and NPM versions
+      ansible.builtin.debug:
+        msg:
+          - "Node.js version: {{ node_version.stdout }}"
+          - "NPM version: {{ npm_version.stdout }}"
+
+    # ============================================
+    # Create Directus User and Directory
+    # ============================================
+    - name: Create Directus system group
+      ansible.builtin.group:
+        name: "{{ directus_group }}"
+        system: yes
+        state: present
+
+    - name: Create Directus system user
+      ansible.builtin.user:
+        name: "{{ directus_user }}"
+        group: "{{ directus_group }}"
+        system: yes
+        shell: /bin/bash
+        home: "{{ directus_install_dir }}"
+        create_home: no
+        comment: "Directus CMS Service User"
+        state: present
+
+    - name: Create Directus installation directory
+      ansible.builtin.file:
+        path: "{{ directus_install_dir }}"
+        state: directory
+        owner: "{{ directus_user }}"
+        group: "{{ directus_group }}"
+        mode: '0755'
+
+    - name: Create Directus uploads directory
+      ansible.builtin.file:
+        path: "{{ directus_install_dir }}/uploads"
+        state: directory
+        owner: "{{ directus_user }}"
+        group: "{{ directus_group }}"
+        mode: '0755'
+
+    - name: Create Directus extensions directory
+      ansible.builtin.file:
+        path: "{{ directus_install_dir }}/extensions"
+        state: directory
+        owner: "{{ directus_user }}"
+        group: "{{ directus_group }}"
+        mode: '0755'
+
+    # ============================================
+    # Generate Security Keys
+    # ============================================
+    - name: Generate Directus KEY
+      ansible.builtin.shell: openssl rand -base64 32
+      register: generated_key
+      changed_when: false
+
+    - name: Generate Directus SECRET
+      ansible.builtin.shell: openssl rand -base64 32
+      register: generated_secret
+      changed_when: false
+
+    - name: Set generated keys as facts
+      ansible.builtin.set_fact:
+        directus_key: "{{ generated_key.stdout }}"
+        directus_secret: "{{ generated_secret.stdout }}"
+
+    # ============================================
+    # Install Directus
+    # ============================================
+    - name: Initialize package.json in Directus directory
+      become: yes
+      become_user: "{{ directus_user }}"
+      ansible.builtin.shell: |
+        cd {{ directus_install_dir }}
+        npm init -y
+      args:
+        creates: "{{ directus_install_dir }}/package.json"
+
+    - name: Install Directus via NPM
+      become: yes
+      become_user: "{{ directus_user }}"
+      ansible.builtin.shell: |
+        cd {{ directus_install_dir }}
+        npm install directus@{{ directus_version }}
+      args:
+        creates: "{{ directus_install_dir }}/node_modules/directus"
+      register: directus_install
+      timeout: 600
+
+    - name: Display Directus installation status
+      ansible.builtin.debug:
+        msg: "Directus {{ 'installed successfully' if directus_install.changed else 'already installed' }}"
+
+    # ============================================
+    # Configure Directus
+    # ============================================
+    - name: Create Directus .env file
+      ansible.builtin.template:
+        src: ../templates/directus.env.j2
+        dest: "{{ directus_install_dir }}/.env"
+        owner: "{{ directus_user }}"
+        group: "{{ directus_group }}"
+        mode: '0600'
+      register: env_file
+
+    - name: Create .env file from inline template if template file doesn't exist
+      ansible.builtin.copy:
+        dest: "{{ directus_install_dir }}/.env"
+        owner: "{{ directus_user }}"
+        group: "{{ directus_group }}"
+        mode: '0600'
+        content: |
+          ####################################################################################################
+          ## Directus Configuration
+          ####################################################################################################
+
+          # General Configuration
+          HOST=0.0.0.0
+          PORT={{ directus_port }}
+          PUBLIC_URL={{ directus_public_url }}
+
+          # Database Configuration
+          DB_CLIENT={{ directus_db_client }}
+          DB_HOST={{ directus_db_host }}
+          DB_PORT={{ directus_db_port }}
+          DB_DATABASE={{ directus_db_name }}
+          DB_USER={{ directus_db_user }}
+          DB_PASSWORD={{ directus_db_password }}
+
+          # Security Configuration
+          KEY={{ directus_key }}
+          SECRET={{ directus_secret }}
+
+          # Admin User (first time only)
+          ADMIN_EMAIL={{ directus_admin_email }}
+          ADMIN_PASSWORD={{ directus_admin_password }}
+
+          # Rate Limiting
+          RATE_LIMITER_ENABLED=true
+          RATE_LIMITER_POINTS=50
+          RATE_LIMITER_DURATION=1
+
+          # File Storage
+          STORAGE_LOCATIONS=local
+          STORAGE_LOCAL_ROOT={{ directus_install_dir }}/uploads
+
+          # Email Configuration (optional - configure as needed)
+          # EMAIL_FROM=noreply@cecairbar.org.br
+          # EMAIL_TRANSPORT=smtp
+          # EMAIL_SMTP_HOST=localhost
+          # EMAIL_SMTP_PORT=25
+          # EMAIL_SMTP_USER=
+          # EMAIL_SMTP_PASSWORD=
+
+          # Cache Configuration
+          CACHE_ENABLED=true
+          CACHE_STORE=memory
+          CACHE_TTL=10m
+
+          # Assets
+          ASSETS_CACHE_TTL=30d
+
+          # CORS Configuration
+          CORS_ENABLED=true
+          CORS_ORIGIN=true
+
+          # Log Level
+          LOG_LEVEL=info
+
+          # Extensions
+          EXTENSIONS_PATH={{ directus_install_dir }}/extensions
+      when: env_file.failed | default(false)
+
+    # ============================================
+    # Initialize Directus Database
+    # ============================================
+    - name: Bootstrap Directus database
+      become: yes
+      become_user: "{{ directus_user }}"
+      ansible.builtin.shell: |
+        cd {{ directus_install_dir }}
+        npx directus bootstrap
+      environment:
+        NODE_ENV: production
+      register: bootstrap_result
+      failed_when: false
+      changed_when: "'already initialized' not in bootstrap_result.stdout"
+
+    - name: Display bootstrap result
+      ansible.builtin.debug:
+        msg: "{{ bootstrap_result.stdout_lines }}"
+
+    # ============================================
+    # Create systemd Service
+    # ============================================
+    - name: Copy Directus systemd service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/directus.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Directus CMS
+          Documentation=https://docs.directus.io
+          After=network.target postgresql.service
+          Wants=postgresql.service
+
+          [Service]
+          Type=simple
+          User={{ directus_user }}
+          Group={{ directus_group }}
+          WorkingDirectory={{ directus_install_dir }}
+
+          # Environment
+          Environment="NODE_ENV=production"
+          Environment="NODE_OPTIONS=--max-old-space-size=2048"
+
+          # Start command
+          ExecStart=/usr/bin/npx directus start
+
+          # Restart policy
+          Restart=on-failure
+          RestartSec=10s
+
+          # Resource limits
+          LimitNOFILE=65536
+
+          # Security
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths={{ directus_install_dir }}/uploads
+
+          # Logging
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=directus
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload systemd
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable Directus service
+      ansible.builtin.systemd:
+        name: directus
+        enabled: yes
+
+    - name: Start Directus service
+      ansible.builtin.systemd:
+        name: directus
+        state: started
+      register: directus_start
+      failed_when: false
+
+    - name: Wait for Directus to be ready
+      ansible.builtin.wait_for:
+        port: "{{ directus_port }}"
+        host: localhost
+        delay: 5
+        timeout: 60
+      when: directus_start is succeeded
+
+    - name: Get Directus service status if start failed
+      ansible.builtin.command: systemctl status directus.service
+      register: directus_status_output
+      when: directus_start.failed
+      failed_when: false
+
+    - name: Get Directus journal logs if start failed
+      ansible.builtin.command: journalctl -xeu directus.service --no-pager -n 50
+      register: directus_journal_output
+      when: directus_start.failed
+      failed_when: false
+
+    - name: Show Directus error details
+      ansible.builtin.debug:
+        msg:
+          - "Directus service start failed!"
+          - "Status output:"
+          - "{{ directus_status_output.stdout_lines | default([]) }}"
+          - "Journal logs:"
+          - "{{ directus_journal_output.stdout_lines | default([]) }}"
+      when: directus_start.failed
+
+    - name: Fail if Directus couldn't start
+      ansible.builtin.fail:
+        msg: "Directus service failed to start. Check the debug output above for details."
+      when: directus_start.failed
+
+    # ============================================
+    # Test Directus
+    # ============================================
+    - name: Test Directus API health endpoint
+      ansible.builtin.uri:
+        url: "http://localhost:{{ directus_port }}/server/health"
+        method: GET
+        status_code: 200
+      register: health_check
+      retries: 3
+      delay: 10
+      until: health_check.status == 200
+
+    - name: Display health check result
+      ansible.builtin.debug:
+        msg: "Directus health check: {{ 'PASSED ✓' if health_check.status == 200 else 'FAILED ✗' }}"
+
+    - name: Test Directus server info endpoint
+      ansible.builtin.uri:
+        url: "http://localhost:{{ directus_port }}/server/info"
+        method: GET
+        status_code: 200
+      register: info_check
+      failed_when: false
+
+    - name: Display server info
+      ansible.builtin.debug:
+        msg: "{{ info_check.json }}"
+      when: info_check.status == 200
+
+    # ============================================
+    # Configure Firewall
+    # ============================================
+    - name: Configure firewall to allow Directus port (if ufw is enabled)
+      community.general.ufw:
+        rule: allow
+        port: "{{ directus_port }}"
+        proto: tcp
+        comment: "Directus CMS"
+      ignore_errors: yes
+
+    # ============================================
+    # Create Summary
+    # ============================================
+    - name: Create Directus configuration summary file
+      ansible.builtin.copy:
+        dest: /tmp/directus-installation-summary.txt
+        content: |
+          ==========================================
+          Directus CMS Installation Summary
+          ==========================================
+
+          Installation Details:
+          - Installation Directory: {{ directus_install_dir }}
+          - Directus User: {{ directus_user }}
+          - Directus Group: {{ directus_group }}
+          - Node.js Version: {{ node_version.stdout }}
+          - NPM Version: {{ npm_version.stdout }}
+
+          Service Configuration:
+          - Service Name: directus.service
+          - Service Port: {{ directus_port }}
+          - Service Status: {{ directus_start.status.ActiveState | default('Unknown') }}
+
+          Database Configuration:
+          - Database Type: PostgreSQL
+          - Database Host: {{ directus_db_host }}
+          - Database Port: {{ directus_db_port }}
+          - Database Name: {{ directus_db_name }}
+          - Database User: {{ directus_db_user }}
+
+          Admin Access:
+          - Admin Email: {{ directus_admin_email }}
+          - Admin Password: {{ directus_admin_password }}
+
+          Access URLs:
+          - Local: http://localhost:{{ directus_port }}
+          - External (via NGINX): {{ directus_public_url }}
+          - Admin Panel: {{ directus_public_url }}/admin
+          - API: {{ directus_public_url }}/items
+          - Health Check: {{ directus_public_url }}/server/health
+          - Local Health Check: http://localhost:{{ directus_port }}/server/health
+
+          Security Keys:
+          - KEY: {{ directus_key }}
+          - SECRET: {{ directus_secret }}
+
+          Service Management:
+          - Start: systemctl start directus
+          - Stop: systemctl stop directus
+          - Restart: systemctl restart directus
+          - Status: systemctl status directus
+          - Logs: journalctl -fu directus
+
+          File Locations:
+          - Configuration: {{ directus_install_dir }}/.env
+          - Uploads: {{ directus_install_dir }}/uploads
+          - Extensions: {{ directus_install_dir }}/extensions
+          - Logs: journalctl -u directus
+
+          Next Steps:
+          1. Configure NGINX reverse proxy for {{ directus_public_url }}
+          2. Access admin panel: {{ directus_public_url }}/admin
+          3. Login with admin credentials above
+          4. Configure collections and data model
+          5. Set up API access for applications
+
+          ==========================================
+          Installation completed at: {{ ansible_date_time.iso8601 }}
+          ==========================================
+        mode: '0644'
+
+    - name: Fetch configuration summary to local machine
+      ansible.builtin.fetch:
+        src: /tmp/directus-installation-summary.txt
+        dest: /tmp/directus-installation-summary-{{ inventory_hostname }}.txt
+        flat: yes
+
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "Directus CMS Installation Complete!"
+          - "=========================================="
+          - ""
+          - "Service: directus.service"
+          - "Status: {{ directus_start.status.ActiveState | default('Active') }}"
+          - "Port: {{ directus_port }}"
+          - ""
+          - "Local Access: http://localhost:{{ directus_port }}"
+          - "Public URL: {{ directus_public_url }}"
+          - "Admin Panel: {{ directus_public_url }}/admin"
+          - ""
+          - "Admin Email: {{ directus_admin_email }}"
+          - "Admin Password: {{ directus_admin_password }}"
+          - ""
+          - "Configuration: {{ directus_install_dir }}/.env"
+          - "Summary saved to: /tmp/directus-installation-summary-{{ inventory_hostname }}.txt"
+          - ""
+          - "Next: Configure NGINX reverse proxy"
+          - "=========================================="
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: restart directus
+      ansible.builtin.systemd:
+        name: directus
+        state: restarted
