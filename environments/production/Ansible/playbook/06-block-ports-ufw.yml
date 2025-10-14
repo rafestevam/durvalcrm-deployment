@@ -19,6 +19,7 @@
       - { port: "9990", proto: "tcp", comment: "WildFly Management - internal only" }
       - { port: "9993", proto: "tcp", comment: "WildFly Management HTTPS - internal only" }
       - { port: "5432", proto: "tcp", comment: "PostgreSQL - internal only" }
+      - { port: "3000", proto: "tcp", comment: "WebServer - internal only" }
 
   tasks:
     - name: Check if UFW is installed

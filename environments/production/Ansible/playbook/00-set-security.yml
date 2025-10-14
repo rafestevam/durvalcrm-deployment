@@ -31,6 +31,12 @@
       - name: "directus"
         full_domain: "directus.cecairbar.org.br"
         description: "Directus CMS"
+      - name: "home"
+        full_domain: "cecairbar.org.br"
+        description: "Home Page"
+      - name: "www"
+        full_domain: "www.cecairbar.org.br"
+        description: "Home Page WWW"
 
   tasks:
     - name: Update apt cache
