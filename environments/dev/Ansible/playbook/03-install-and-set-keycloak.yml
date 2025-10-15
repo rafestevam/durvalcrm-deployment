@@ -139,16 +139,22 @@
         recurse: yes
         state: directory
 
-    - name: Find Java home directory
-      ansible.builtin.shell: |
-        update-java-alternatives -l | grep java-17-openjdk | head -n 1 | awk '{print $3}'
-      register: java_home_path
+    - name: Find Java executable path
+      ansible.builtin.shell: which java
+      register: java_executable
       changed_when: false
       failed_when: false
 
+    - name: Find Java home directory from executable
+      ansible.builtin.shell: dirname $(dirname $(readlink -f {{ java_executable.stdout }}))
+      register: java_home_path
+      changed_when: false
+      failed_when: false
+      when: java_executable.stdout != ''
+
     - name: Set Java home fact
       ansible.builtin.set_fact:
-        java_home: "{{ java_home_path.stdout if java_home_path.stdout != '' else '/usr/lib/jvm/java-17-openjdk-amd64' }}"
+        java_home: "{{ java_home_path.stdout if java_home_path.stdout is defined and java_home_path.stdout != '' else '/usr/lib/jvm/default-java' }}"
 
     - name: Configure Keycloak database connection
       ansible.builtin.copy:
