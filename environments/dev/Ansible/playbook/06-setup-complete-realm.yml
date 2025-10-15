@@ -1,0 +1,139 @@
+---
+- name: Setup Complete Keycloak Realm Configuration for Development
+  hosts: vm-dev
+  become: yes
+  vars:
+    keycloak_home: "/opt/keycloak"
+    keycloak_port: "8090"
+    python_script: "setup-realm-complete.py"
+    # Development URLs
+    app_base_url_localhost: "http://localhost:9080"
+    app_base_url_127: "http://127.0.0.1:9080"
+    app_context_path: "/crm"
+
+  tasks:
+    - name: Copy complete realm setup script
+      ansible.builtin.copy:
+        src: ../files/keycloak/{{ python_script }}
+        dest: /tmp/{{ python_script }}
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Install required Python packages
+      ansible.builtin.apt:
+        name:
+          - python3-pip
+          - python3-requests
+        state: present
+        update_cache: yes
+
+    - name: Check if Keycloak service exists
+      ansible.builtin.systemd:
+        name: keycloak
+      register: keycloak_service_status
+      failed_when: false
+
+    - name: Start Keycloak service if it exists
+      ansible.builtin.systemd:
+        name: keycloak
+        state: started
+        enabled: yes
+      when: keycloak_service_status.status is defined
+      register: keycloak_start
+
+    - name: Wait for Keycloak to be fully ready
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_port }}/realms/master"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: keycloak_health
+      retries: 30
+      delay: 10
+      until: keycloak_health.status == 200
+
+    - name: Execute complete realm setup script
+      ansible.builtin.command:
+        cmd: python3 /tmp/{{ python_script }}
+      environment:
+        KEYCLOAK_URL: "http://localhost:{{ keycloak_port }}"
+        APP_BASE_URL_LOCALHOST: "{{ app_base_url_localhost }}"
+        APP_BASE_URL_127: "{{ app_base_url_127 }}"
+        APP_CONTEXT_PATH: "{{ app_context_path }}"
+      register: setup_result
+      failed_when: setup_result.rc != 0
+
+    - name: Display setup script output
+      ansible.builtin.debug:
+        msg: "{{ setup_result.stdout_lines }}"
+
+    - name: Display any errors from setup
+      ansible.builtin.debug:
+        msg: "Errors: {{ setup_result.stderr_lines }}"
+      when: setup_result.stderr_lines | length > 0
+
+    - name: Wait for configuration to take effect
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Test realm configuration
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_port }}/realms/durval-crm"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: realm_test
+
+    - name: Test OpenID configuration
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_port }}/realms/durval-crm/.well-known/openid-configuration"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: openid_test
+
+    - name: Extract issuer from OpenID configuration
+      ansible.builtin.set_fact:
+        issuer_url: "{{ (openid_test.content | from_json).issuer }}"
+
+    - name: Display issuer URL
+      ansible.builtin.debug:
+        msg: "Issuer URL: {{ issuer_url }}"
+
+    - name: Test user authentication
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_port }}/realms/durval-crm/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: admin-cli
+          username: tesouraria
+          password: cairbar@2025
+        status_code: 200
+        timeout: 10
+      register: auth_test
+      failed_when: false
+
+    - name: Display authentication test result
+      ansible.builtin.debug:
+        msg: "{{ '✅ User tesouraria can authenticate successfully' if auth_test.status == 200 else '❌ User authentication failed' }}"
+
+    - name: Final success message
+      ansible.builtin.debug:
+        msg:
+          - "🎉 Keycloak realm setup completed successfully!"
+          - "📋 Configuration Summary:"
+          - "   ✅ Realm: durval-crm"
+          - "   ✅ Client: durvalcrm-app (with PKCE)"
+          - "   ✅ User: tesouraria / cairbar@2025"
+          - "   ✅ Issuer URL: {{ issuer_url }}"
+          - "   ✅ Keycloak URL: http://localhost:{{ keycloak_port }}"
+          - "   ✅ Admin Console: http://localhost:{{ keycloak_port }}/admin"
+          - "   ✅ Redirect URIs configured for:"
+          - "      - {{ app_base_url_localhost }}{{ app_context_path }}/auth/callback"
+          - "      - {{ app_base_url_127 }}{{ app_context_path }}/auth/callback"
+          - ""
+          - "🧪 Development environment ready for testing!"
+          - "🔐 Login at: http://localhost:9080/crm/"
