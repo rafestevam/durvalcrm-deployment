@@ -3,7 +3,7 @@
   hosts: vm-dev
   become: yes
   vars:
-    keycloak_version: "26.0.7"
+    keycloak_version: "26.3.2"
     keycloak_download_url: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"
     keycloak_home: "/opt/keycloak"
     keycloak_user: "keycloak"
@@ -141,13 +141,14 @@
 
     - name: Find Java home directory
       ansible.builtin.shell: |
-        update-java-alternatives -l | grep java-17-openjdk | awk '{print $3}'
+        update-java-alternatives -l | grep java-17-openjdk | head -n 1 | awk '{print $3}'
       register: java_home_path
       changed_when: false
+      failed_when: false
 
     - name: Set Java home fact
       ansible.builtin.set_fact:
-        java_home: "{{ java_home_path.stdout | default('/usr/lib/jvm/java-17-openjdk-amd64') }}"
+        java_home: "{{ java_home_path.stdout if java_home_path.stdout != '' else '/usr/lib/jvm/java-17-openjdk-amd64' }}"
 
     - name: Configure Keycloak database connection
       ansible.builtin.copy:
@@ -338,13 +339,24 @@
         - admin_token_response.json.access_token is defined
       failed_when: false
 
+    - name: Determine client creation status
+      ansible.builtin.set_fact:
+        client_status_msg: >-
+          {% if client_creation_result.status == 201 %}created successfully
+          {% elif client_creation_result.status == 409 %}already exists
+          {% else %}creation failed with status {{ client_creation_result.status }}
+          {% endif %}
+      when: client_creation_result is defined
+
     - name: Show client creation result
       ansible.builtin.debug:
-        msg: 
-          - "Client '{{ client_name }}' {{ 'created successfully' if client_creation_result.status == 201 else 'already exists' if client_creation_result.status == 409 else 'creation failed with status ' + client_creation_result.status | string }}"
+        msg:
+          - "Client '{{ client_name }}' {{ client_status_msg }}"
           - "Redirect URIs: {{ redirect_uris | join(', ') }}"
           - "Web Origins: {{ web_origins | join(', ') }}"
-      when: client_creation_result is defined
+      when:
+        - client_creation_result is defined
+        - client_status_msg is defined
 
     - name: Test user authentication
       ansible.builtin.uri:
