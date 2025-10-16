@@ -3,7 +3,7 @@
   hosts: vm-dev
   become: yes
   vars:
-    keycloak_version: "26.3.2"
+    keycloak_version: "26.0.7"
     keycloak_download_url: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"
     keycloak_home: "/opt/keycloak"
     keycloak_user: "keycloak"
@@ -28,9 +28,15 @@
     redirect_uris:
       - "{{ app_base_url_localhost }}{{ app_context_path }}/*"
       - "{{ app_base_url_127 }}{{ app_context_path }}/*"
+      - "{{ app_base_url_localhost }}{{ app_context_path }}/auth/callback"
+      - "{{ app_base_url_127 }}{{ app_context_path }}/auth/callback"
+      - "{{ app_base_url_localhost }}/auth/callback"
+      - "{{ app_base_url_127 }}/auth/callback"
     web_origins:
-      - "{{ app_base_url_localhost }}{{ app_context_path }}"
-      - "{{ app_base_url_127 }}{{ app_context_path }}"
+      - "{{ app_base_url_localhost }}"
+      - "{{ app_base_url_127 }}"
+      - "http://localhost:5173"
+      - "http://127.0.0.1:5173"
 
   tasks:
     - name: Update apt cache
@@ -325,8 +331,8 @@
         body_format: json
         body:
           clientId: "{{ client_name }}"
-          name: "DurvalCRM Application"
-          description: "Client for DurvalCRM web application"
+          name: "DurvalCRM Application - Development"
+          description: "DurvalCRM Vue.js Frontend Application - Development Environment"
           enabled: true
           publicClient: true
           standardFlowEnabled: true
@@ -334,13 +340,18 @@
           directAccessGrantsEnabled: true
           serviceAccountsEnabled: false
           protocol: "openid-connect"
+          fullScopeAllowed: true
           redirectUris: "{{ redirect_uris }}"
           webOrigins: "{{ web_origins }}"
           attributes:
             "pkce.code.challenge.method": "S256"
+            "post.logout.redirect.uris": "+"
+            "oauth2.device.authorization.grant.enabled": "false"
+            "backchannel.logout.session.required": "true"
+            "backchannel.logout.revoke.offline.tokens": "false"
         status_code: [201, 409]
       register: client_creation_result
-      when: 
+      when:
         - realm_verify.status == 200
         - admin_token_response.json.access_token is defined
       failed_when: false
@@ -363,6 +374,55 @@
       when:
         - client_creation_result is defined
         - client_status_msg is defined
+
+    - name: Get all clients in master realm to find security-admin-console
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/admin/realms/master/clients?clientId=security-admin-console"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ admin_token_response.json.access_token }}"
+        status_code: 200
+      register: admin_console_clients
+      when: admin_token_response.json.access_token is defined
+
+    - name: Fix security-admin-console client for realm switching
+      ansible.builtin.uri:
+        url: "http://localhost:{{ keycloak_http_port }}/admin/realms/master/clients/{{ admin_console_clients.json[0].id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ admin_token_response.json.access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          clientId: "security-admin-console"
+          rootUrl: ""
+          baseUrl: "/admin/master/console/"
+          redirectUris:
+            - "{{ app_base_url_localhost }}/admin/master/console/*"
+            - "{{ app_base_url_localhost }}/admin/durval-crm/console/*"
+            - "{{ app_base_url_localhost }}/admin/*/console/*"
+            - "{{ app_base_url_127 }}/admin/master/console/*"
+            - "{{ app_base_url_127 }}/admin/durval-crm/console/*"
+            - "{{ app_base_url_127 }}/admin/*/console/*"
+            - "/admin/*/console/*"
+          webOrigins:
+            - "+"
+          publicClient: true
+          standardFlowEnabled: true
+          attributes:
+            post.logout.redirect.uris: "+"
+        status_code: 204
+      register: admin_console_fix
+      when:
+        - admin_token_response.json.access_token is defined
+        - admin_console_clients.json is defined
+        - admin_console_clients.json | length > 0
+      failed_when: false
+
+    - name: Show security-admin-console fix result
+      ansible.builtin.debug:
+        msg: "security-admin-console client {{ 'fixed successfully - PKCE removed, realm switching enabled' if admin_console_fix.status == 204 else 'fix failed or skipped' }}"
+      when: admin_console_fix is defined
 
     - name: Test user authentication
       ansible.builtin.uri:

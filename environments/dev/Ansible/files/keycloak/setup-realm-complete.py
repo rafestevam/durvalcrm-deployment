@@ -167,6 +167,77 @@ class KeycloakAdmin:
             print(f"❌ Failed to set password: {response.status_code} - {response.text}")
             return False
 
+    def fix_admin_console_client(self):
+        """Fix security-admin-console client to allow access to all realms without PKCE"""
+        print("🔧 Fixing security-admin-console client configuration...")
+
+        # Get all clients in master realm
+        url = f"{self.base_url}/admin/realms/master/clients"
+        response = requests.get(url, headers=self.headers(), verify=False)
+
+        if response.status_code != 200:
+            print(f"⚠️  Could not get clients: {response.status_code}")
+            return False
+
+        clients = response.json()
+        console_client = None
+
+        for client in clients:
+            if client['clientId'] == 'security-admin-console':
+                console_client = client
+                break
+
+        if not console_client:
+            print("⚠️  security-admin-console client not found")
+            return False
+
+        # Get full client configuration
+        client_id = console_client['id']
+        get_url = f"{self.base_url}/admin/realms/master/clients/{client_id}"
+        response = requests.get(get_url, headers=self.headers(), verify=False)
+
+        if response.status_code != 200:
+            print(f"⚠️  Could not get full client config: {response.status_code}")
+            return False
+
+        full_client = response.json()
+
+        # Update client with specific redirect URIs and remove PKCE requirement
+        update_url = f"{self.base_url}/admin/realms/master/clients/{client_id}"
+
+        # Remove PKCE from attributes if present
+        if 'attributes' in full_client and 'pkce.code.challenge.method' in full_client['attributes']:
+            del full_client['attributes']['pkce.code.challenge.method']
+
+        # Update redirect URIs with specific realm paths
+        full_client['redirectUris'] = [
+            f"{APP_BASE_URL_LOCALHOST}/admin/master/console/*",
+            f"{APP_BASE_URL_LOCALHOST}/admin/durval-crm/console/*",
+            f"{APP_BASE_URL_LOCALHOST}/admin/*/console/*",
+            f"{APP_BASE_URL_127}/admin/master/console/*",
+            f"{APP_BASE_URL_127}/admin/durval-crm/console/*",
+            f"{APP_BASE_URL_127}/admin/*/console/*",
+            "/admin/*/console/*"
+        ]
+
+        # Ensure other required fields
+        full_client['webOrigins'] = ["+"]
+        full_client['publicClient'] = True
+        full_client['standardFlowEnabled'] = True
+
+        if 'attributes' not in full_client:
+            full_client['attributes'] = {}
+        full_client['attributes']['post.logout.redirect.uris'] = "+"
+
+        response = requests.put(update_url, headers=self.headers(), json=full_client, verify=False)
+
+        if response.status_code == 204:
+            print("✅ Admin console client fixed - PKCE removed, all realms accessible")
+            return True
+        else:
+            print(f"⚠️  Could not update client: {response.status_code} - {response.text}")
+            return False
+
 def main():
     print("🚀 Starting Keycloak Realm Setup for Development...")
     print(f"📍 Keycloak URL: {KEYCLOAK_URL}")
@@ -281,6 +352,9 @@ def main():
     print("🔒 Setting user password...")
     if not kc.set_user_password("durval-crm", user_id, "cairbar@2025"):
         sys.exit(1)
+
+    # Fix admin console client to allow switching between realms
+    kc.fix_admin_console_client()
 
     print("\n" + "="*60)
     print("🎉 Keycloak setup completed successfully!")

@@ -95,7 +95,7 @@
 
     - name: Extract issuer from OpenID configuration
       ansible.builtin.set_fact:
-        issuer_url: "{{ (openid_test.content | from_json).issuer }}"
+        issuer_url: "{{ openid_test.json.issuer }}"
 
     - name: Display issuer URL
       ansible.builtin.debug:
